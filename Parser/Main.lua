@@ -1,0 +1,2685 @@
+--[[
+    GreedMeter - Parser / Main
+    Combat log parsing, metrics, attribution, history.
+    Locale-independent via global combat text patterns.
+]]
+
+local OM = GreedMeter
+local Parser = {}
+GreedMeter.ParserNS = GreedMeter.ParserNS or {}
+GreedMeter.ParserNS.Parser = Parser
+
+-- ============================================================
+-- Data storage (per segment)
+-- ============================================================
+
+OM.data = {
+    current = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Current" },
+    overall = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Overall" },
+    -- Last 2 fights of any kind (newest first)
+    recentFights = {},
+    -- Last 3 boss fights (newest first)
+    bossFights = {},
+}
+
+local MAX_RECENT_FIGHTS = 3
+local MAX_BOSS_FIGHTS = 5
+
+-- Per-fight enemy tracking for naming + boss detection
+local fightEnemies = {}        -- [name] = damage dealt to them by group
+local fightEnemyDeaths = {}    -- [name] = how many times this name died this fight
+local fightDuplicateNames = {} -- [name] = true if name is not unique (pack trash)
+local fightIsBoss = false
+local fightBossName = nil
+
+-- ============================================================
+-- Helpers
+-- ============================================================
+
+local playerName = nil
+
+-- Resolve "You" and SuperWoW-style pet ownership names
+local function NormalizeName(name)
+    if not name then return nil end
+    if name == "You" or name == "you" then
+        return playerName or UnitName("player")
+    end
+    -- SuperWoW style: "PetName (OwnerName)"
+    local _, _, pet, owner = string.find(name, "^(.+) %((.+)%)$")
+    if pet and owner then
+        return owner
+    end
+    return name
+end
+
+
+-- ============================================================
+-- SuperWoW helpers (preferred path when available)
+-- ============================================================
+local guidToName = {}
+local nameToGuid = {}
+local usingRawCombatLog = false
+
+local function SuperWoWAvailable()
+    if OM and OM.HasSuperWoW then
+        return OM:HasSuperWoW()
+    end
+    return (SUPERWOW_VERSION or SUPERWOW_STRING or SuperWoW) and true or false
+end
+
+local function CacheGuid(name, guid)
+    if not name or name == "" or not guid or guid == "" then return end
+    name = NormalizeName(name) or name
+    guidToName[guid] = name
+    nameToGuid[name] = guid
+end
+
+local function NameFromGuid(guid)
+    if not guid then return nil end
+    if guidToName[guid] then return guidToName[guid] end
+    return nil
+end
+
+-- Strip SuperWoW GUID tokens from a combat log line while caching them
+-- Handles forms like: 0xF130..., player-..., and trailing GUID chunks
+local function StripAndCacheGuids(msg)
+    if not msg then return msg end
+    local cleaned = msg
+    -- Cache "Name 0xGUID" pairs before stripping (only 0x-prefixed GUIDs)
+    local pos = 1
+    while true do
+        local s, e, name, guid = string.find(cleaned, "([%w'-]+)%s+(0[xX]%x+)", pos)
+        if not s then break end
+        if string.len(guid) >= 10 then
+            CacheGuid(name, guid)
+        end
+        pos = e + 1
+    end
+    -- Remove only 0x-prefixed GUID tokens — never bare numbers (those are damage amounts)
+    cleaned = string.gsub(cleaned, "%s*0[xX]%x%x%x%x%x%x%x%x+", "")
+    return cleaned
+end
+
+local function RefreshGuidCacheFromUnits()
+    if not SuperWoWAvailable() then return end
+    local function scan(unit)
+        if not UnitExists(unit) then return end
+        local name = UnitName(unit)
+        local guid = nil
+        if type(UnitGUID) == "function" then
+            guid = UnitGUID(unit)
+        else
+            -- SuperWoW: UnitExists returns GUID as 2nd value
+            local ok, g = UnitExists(unit)
+            if ok and g and type(g) == "string" and string.len(g) > 4 then
+                guid = g
+            end
+        end
+        if name and guid then
+            CacheGuid(name, guid)
+        end
+        -- Pet
+        local petUnit = unit
+        if unit == "player" then
+            petUnit = "pet"
+        else
+            local _, _, idx = string.find(unit, "^raid(%d+)$")
+            if idx then
+                petUnit = "raidpet" .. idx
+            else
+                local _, _, pidx = string.find(unit, "^party(%d+)$")
+                if pidx then
+                    petUnit = "partypet" .. pidx
+                else
+                    petUnit = nil
+                end
+            end
+        end
+        if petUnit and UnitExists(petUnit) then
+            local pname = UnitName(petUnit)
+            local pguid = nil
+            if type(UnitGUID) == "function" then
+                pguid = UnitGUID(petUnit)
+            end
+            if pname and pguid then
+                CacheGuid(pname, pguid)
+            end
+            -- Ownership: map pet name to owner for ResolveSource
+            if pname and name then
+                OM.heuristicPets = OM.heuristicPets or {}
+                OM.heuristicPets[pname] = name
+            end
+        end
+    end
+    scan("player")
+    local i
+    for i = 1, 4 do scan("party" .. i) end
+    for i = 1, 40 do scan("raid" .. i) end
+end
+
+local function EnsurePlayer(segment, name)
+    if not name or name == "" then return nil end
+    if not segment.players[name] then
+        local class = nil
+        if OM.players and OM.players[name] then
+            class = OM.players[name].class
+        end
+        segment.players[name] = {
+            damage = 0,
+            healing = 0,       -- effective healing (raw - overheal) + absorbs
+            overhealing = 0,   -- wasted heal amount
+            rawHealing = 0,    -- full heal amount before overheal subtract
+            absorbs = 0,
+            damageTaken = 0,
+            dispels = { count = 0, list = {} },
+            interrupts = { count = 0, list = {} },
+            ccBreaks = { count = 0, list = {} },
+            deaths = { count = 0, list = {} },
+            damageTakenBy = {},
+            damageTo = {},     -- [targetName] = amount
+            healingTo = {},    -- [targetName] = effective amount
+            damageSpells = {}, -- damage by spell name
+            healSpells = {},   -- healing by spell name
+            class = class,     -- stored so colors survive roster changes
+        }
+    end
+    -- Keep class updated if roster knows it
+    if OM.players and OM.players[name] and OM.players[name].class then
+        segment.players[name].class = OM.players[name].class
+    end
+    -- Backfill if older structure
+    if not segment.players[name].overhealing then
+        segment.players[name].overhealing = 0
+    end
+    if not segment.players[name].rawHealing then
+        segment.players[name].rawHealing = segment.players[name].healing or 0
+    end
+    if not segment.players[name].damageTo then
+        segment.players[name].damageTo = {}
+    end
+    if not segment.players[name].healingTo then
+        segment.players[name].healingTo = {}
+    end
+    if not segment.players[name].damageSpells then
+        segment.players[name].damageSpells = {}
+    end
+    if not segment.players[name].healSpells then
+        segment.players[name].healSpells = {}
+    end
+    if not segment.players[name].ccBreaks then
+        segment.players[name].ccBreaks = { count = 0, list = {} }
+    end
+    if not segment.players[name].deaths then
+        segment.players[name].deaths = { count = 0, list = {} }
+    end
+    if not segment.players[name].dispels then
+        segment.players[name].dispels = { count = 0, list = {} }
+    end
+    if not segment.players[name].interrupts then
+        segment.players[name].interrupts = { count = 0, list = {} }
+    end
+    return segment.players[name]
+end
+
+-- Find a unit token for a player name (needed for health deficit / overheal)
+local function FindUnitByName(name)
+    if not name then return nil end
+    if UnitName("player") == name then return "player" end
+    for i = 1, 4 do
+        local u = "party"..i
+        if UnitExists(u) and UnitName(u) == name then return u end
+    end
+    if GetNumRaidMembers() > 0 then
+        for i = 1, 40 do
+            local u = "raid"..i
+            if UnitExists(u) and UnitName(u) == name then return u end
+        end
+    end
+    if UnitExists("target") and UnitName("target") == name then return "target" end
+    if UnitExists("targettarget") and UnitName("targettarget") == name then return "targettarget" end
+    return nil
+end
+
+-- Compute effective heal vs overheal using the target's current deficit
+local function SplitOverheal(targetName, amount)
+    amount = tonumber(amount) or 0
+    if amount <= 0 then return 0, 0 end
+
+    targetName = NormalizeName(targetName)
+    local unit = FindUnitByName(targetName)
+    if not unit then
+        -- Unknown unit: count full amount as effective (avoid under-counting)
+        return amount, 0
+    end
+
+    local maxhp = UnitHealthMax(unit)
+    local curhp = UnitHealth(unit)
+    if not maxhp or maxhp <= 0 then
+        return amount, 0
+    end
+
+    local deficit = maxhp - curhp
+    if deficit < 0 then deficit = 0 end
+
+    local effective = amount
+    local over = 0
+    if amount > deficit then
+        effective = deficit
+        over = amount - deficit
+    end
+    return effective, over
+end
+
+local function ResolveSource(name)
+    name = NormalizeName(name)
+    if not name then return nil end
+
+    -- Already a group player
+    if OM.players[name] then
+        return name
+    end
+
+    -- Pet → owner (roster, heuristic, or orphan assignment)
+    local owner = OM:ResolvePetOwner(name)
+    if owner then
+        return owner
+    end
+
+    return name
+end
+
+local function IsTracked(name)
+    if not name then return false end
+    if OM.players[name] then return true end
+    -- Known pet names only (unit-token / roster). Never invent ownership here.
+    if OM:GetPetOwner(name) then return true end
+    return false
+end
+
+-- ============================================================
+-- Absorb shield tracking
+-- Credits absorbed damage as healing to the shield provider when known.
+-- ============================================================
+
+local ABSORB_SHIELDS = {
+    ["Power Word: Shield"] = true,
+    ["Ice Barrier"] = true,
+    ["Mana Shield"] = true,
+    ["Sacrifice"] = true,
+    ["Frost Ward"] = true,
+    ["Fire Ward"] = true,
+}
+
+-- absorbAuras[targetName] = { [shieldName] = applicatorName }
+local absorbAuras = {}
+-- recentAbsorbCaster[spellName] = { name = "Caster", time = GetTime() }
+local recentAbsorbCaster = {}
+local RECENT_CASTER_TIMEOUT = 8
+
+local function IsAbsorbShield(spell)
+    if not spell then return false end
+    if ABSORB_SHIELDS[spell] then return true end
+    for name, _ in pairs(ABSORB_SHIELDS) do
+        if string.find(spell, name, 1, true) then return true end
+    end
+    return false
+end
+
+local function NoteRecentAbsorbCaster(spell, caster)
+    if not spell or not caster or not IsAbsorbShield(spell) then return end
+    recentAbsorbCaster[spell] = {
+        name = NormalizeName(caster),
+        time = GetTime(),
+    }
+end
+
+local function GetRecentAbsorbCaster(spell)
+    if not spell then return nil end
+    local entry = recentAbsorbCaster[spell]
+    if not entry then
+        for s, e in pairs(recentAbsorbCaster) do
+            if string.find(spell, s, 1, true) or string.find(s, spell, 1, true) then
+                entry = e
+                break
+            end
+        end
+    end
+    if entry and (GetTime() - entry.time) <= RECENT_CASTER_TIMEOUT then
+        return entry.name
+    end
+    return nil
+end
+
+local function SetAbsorbAura(target, spell, applicator)
+    target = NormalizeName(target)
+    applicator = NormalizeName(applicator)
+    if not target or not spell or not applicator then return end
+    if not absorbAuras[target] then
+        absorbAuras[target] = {}
+    end
+    absorbAuras[target][spell] = applicator
+end
+
+local function ClearAbsorbAura(target, spell)
+    target = NormalizeName(target)
+    if not target or not absorbAuras[target] then return end
+    if spell then
+        for name, _ in pairs(absorbAuras[target]) do
+            if name == spell or string.find(name, spell, 1, true) or string.find(spell, name, 1, true) then
+                absorbAuras[target][name] = nil
+            end
+        end
+        local empty = true
+        for _ in pairs(absorbAuras[target]) do empty = false break end
+        if empty then absorbAuras[target] = nil end
+    else
+        absorbAuras[target] = nil
+    end
+end
+
+local function GetAbsorbApplicator(buffedUnit)
+    buffedUnit = NormalizeName(buffedUnit)
+    if not buffedUnit or not absorbAuras[buffedUnit] then return nil, nil end
+    for spell, applicator in pairs(absorbAuras[buffedUnit]) do
+        if applicator then
+            return applicator, spell
+        end
+    end
+    return nil, nil
+end
+
+-- ============================================================
+-- Recording API
+-- ============================================================
+
+-- True when in a dungeon/raid instance (IsInInstance on most 1.12 private servers)
+local function PlayerInInstance()
+    if type(IsInInstance) == "function" then
+        local inInstance = IsInInstance()
+        return inInstance and true or false
+    end
+    return false
+end
+
+-- Average max HP of group members (party/raid). Falls back to the player alone.
+local function GetGroupAverageMaxHP()
+    local total, count = 0, 0
+
+    local function addUnit(unit)
+        if UnitExists(unit) and UnitIsConnected(unit) then
+            local hp = UnitHealthMax(unit)
+            if hp and hp > 0 then
+                total = total + hp
+                count = count + 1
+            end
+        end
+    end
+
+    addUnit("player")
+    for i = 1, 4 do
+        addUnit("party"..i)
+    end
+    if GetNumRaidMembers() > 0 then
+        for i = 1, 40 do
+            addUnit("raid"..i)
+        end
+    end
+
+    if count == 0 then
+        return UnitHealthMax("player") or 1
+    end
+    return total / count
+end
+
+-- Average player level in the group (for level-gated elite checks)
+local function GetGroupAverageLevel()
+    local total, count = 0, 0
+    local function addUnit(unit)
+        if UnitExists(unit) and UnitIsConnected(unit) then
+            local lvl = UnitLevel(unit)
+            if lvl and lvl > 0 then
+                total = total + lvl
+                count = count + 1
+            end
+        end
+    end
+    addUnit("player")
+    for i = 1, 4 do addUnit("party"..i) end
+    if GetNumRaidMembers() > 0 then
+        for i = 1, 40 do addUnit("raid"..i) end
+    end
+    if count == 0 then return UnitLevel("player") or 1 end
+    return total / count
+end
+
+local function IsUniqueEnemyName(name)
+    if not name then return false end
+    if fightDuplicateNames[name] then return false end
+    local deaths = fightEnemyDeaths[name] or 0
+    -- 2+ deaths of the same name = pack trash, not a unique boss
+    if deaths >= 2 then return false end
+    return true
+end
+
+local function MarkDuplicateName(name)
+    if not name then return end
+    fightDuplicateNames[name] = true
+    -- If we had flagged this name as the boss, clear it
+    if fightBossName == name then
+        fightIsBoss = false
+        fightBossName = nil
+        -- Try to recover another unique boss candidate from enemies hit
+        -- (left for combat-end / next elite hit)
+    end
+end
+
+local function NoteEnemyDeath(name)
+    name = NormalizeName(name)
+    if not name or OM.players[name] then return end
+    fightEnemyDeaths[name] = (fightEnemyDeaths[name] or 0) + 1
+    if fightEnemyDeaths[name] >= 2 then
+        MarkDuplicateName(name)
+    end
+end
+
+local function UnitLooksLikeBoss(unit)
+    if not unit or not UnitExists(unit) then return false end
+    if UnitIsFriend("player", unit) then return false end
+
+    local unitName = UnitName(unit)
+    -- Pack trash shares names; bosses are unique within the fight
+    if unitName and not IsUniqueEnemyName(unitName) then
+        return false
+    end
+
+    local classification = UnitClassification(unit)
+    local level = UnitLevel(unit)
+
+    -- Raid / outdoor world bosses
+    if classification == "worldboss" then return true end
+    -- Skull (??) — typical when the boss is well above the group
+    if level == -1 then return true end
+
+    -- Leveling dungeon bosses: elite/rareelite with a real level, inside an instance
+    if classification == "elite" or classification == "rareelite" then
+        if PlayerInInstance() then
+            local enemyHP = UnitHealthMax(unit) or 0
+            local avgHP = GetGroupAverageMaxHP()
+            if avgHP < 1 then avgHP = 1 end
+            local avgLevel = GetGroupAverageLevel()
+
+            -- Tanky elite relative to the group's average HP
+            if enemyHP >= avgHP * 6 then
+                return true
+            end
+            -- Near group level + meaningful HP pool (covers early dungeon bosses)
+            if level > 0 and level >= (avgLevel - 3) and enemyHP >= avgHP * 3 then
+                return true
+            end
+            -- Rare elites in instances are almost always notable (if unique)
+            if classification == "rareelite" then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function NoteEnemyHit(enemyName, amount)
+    enemyName = NormalizeName(enemyName)
+    if not enemyName or OM.players[enemyName] then return end
+    amount = tonumber(amount) or 0
+    fightEnemies[enemyName] = (fightEnemies[enemyName] or 0) + amount
+
+    -- Never promote non-unique names to boss
+    if not IsUniqueEnemyName(enemyName) then
+        return
+    end
+
+    local units = { "target", "targettarget", "pettarget", "mouseover" }
+    for _, u in ipairs(units) do
+        if UnitExists(u) and UnitName(u) == enemyName and UnitLooksLikeBoss(u) then
+            fightIsBoss = true
+            fightBossName = enemyName
+            break
+        end
+    end
+end
+
+local function DeepCopyPlayerData(data)
+    local p = {
+        damage = data.damage or 0,
+        healing = data.healing or 0,
+        overhealing = data.overhealing or 0,
+        rawHealing = data.rawHealing or 0,
+        absorbs = data.absorbs or 0,
+        damageTaken = data.damageTaken or 0,
+        dispels = { count = 0, list = {} },
+        interrupts = { count = 0, list = {} },
+        ccBreaks = { count = 0, list = {} },
+        deaths = { count = 0, list = {} },
+        damageTakenBy = {},
+        damageTo = {},
+        healingTo = {},
+        damageSpells = {},
+        healSpells = {},
+        class = data.class,
+        dpsSum = data.dpsSum or 0,
+        dpsSamples = data.dpsSamples or 0,
+        hpsSum = data.hpsSum or 0,
+        hpsSamples = data.hpsSamples or 0,
+    }
+    if data.damageTo then
+        for k, v in pairs(data.damageTo) do
+            p.damageTo[k] = v
+        end
+    end
+    if data.healingTo then
+        for k, v in pairs(data.healingTo) do
+            p.healingTo[k] = v
+        end
+    end
+    if data.dispels then
+        p.dispels.count = data.dispels.count or 0
+        p.dispels.targets = {}
+        if data.dispels.list then
+            for i, v in ipairs(data.dispels.list) do
+                p.dispels.list[i] = v
+            end
+        end
+        if data.dispels.targets then
+            for k, v in pairs(data.dispels.targets) do
+                p.dispels.targets[k] = v
+            end
+        end
+    end
+    if data.interrupts then
+        p.interrupts.count = data.interrupts.count or 0
+        if data.interrupts.list then
+            for i, v in ipairs(data.interrupts.list) do
+                p.interrupts.list[i] = v
+            end
+        end
+    end
+    if data.ccBreaks then
+        p.ccBreaks.count = data.ccBreaks.count or 0
+        if data.ccBreaks.list then
+            for i, v in ipairs(data.ccBreaks.list) do
+                if type(v) == "table" then
+                    p.ccBreaks.list[i] = { spell = v.spell, target = v.target }
+                else
+                    p.ccBreaks.list[i] = v
+                end
+            end
+        end
+    end
+    if data.deaths then
+        p.deaths.count = data.deaths.count or 0
+        if data.deaths.list then
+            for i, v in ipairs(data.deaths.list) do
+                if type(v) == "table" then
+                    p.deaths.list[i] = { killer = v.killer, spell = v.spell, amount = v.amount }
+                else
+                    p.deaths.list[i] = v
+                end
+            end
+        end
+    end
+    if data.damageTakenBy then
+        for k, v in pairs(data.damageTakenBy) do
+            p.damageTakenBy[k] = v
+        end
+    end
+    if data.damageSpells then
+        for k, v in pairs(data.damageSpells) do
+            p.damageSpells[k] = v
+        end
+    end
+    if data.healSpells then
+        for k, v in pairs(data.healSpells) do
+            p.healSpells[k] = v
+        end
+    end
+    return p
+end
+
+local function SnapshotSegment(seg)
+    local players = {}
+    if seg and seg.players then
+        for name, data in pairs(seg.players) do
+            players[name] = DeepCopyPlayerData(data)
+        end
+    end
+    local ccTargets = {}
+    if seg and seg.ccTargets then
+        for enemy, data in pairs(seg.ccTargets) do
+            local entry = { count = data.count or 0, duration = data.duration or 0, list = {} }
+            if data.list then
+                local i, v
+                for i, v in ipairs(data.list) do
+                    if type(v) == "table" then
+                        entry.list[i] = { spell = v.spell, duration = v.duration }
+                    end
+                end
+            end
+            ccTargets[enemy] = entry
+        end
+    end
+    return {
+        players = players,
+        ccTargets = ccTargets,
+        startTime = seg and seg.startTime or 0,
+        endTime = seg and seg.endTime or 0,
+        label = seg and seg.label or "Fight",
+        isBoss = seg and seg.isBoss or false,
+        duration = seg and seg.duration or 0,
+    }
+end
+
+local function PickFightLabel()
+    if fightBossName then
+        return fightBossName
+    end
+    local bestName, bestDmg = nil, -1
+    for name, dmg in pairs(fightEnemies) do
+        if dmg > bestDmg then
+            bestDmg = dmg
+            bestName = name
+        end
+    end
+    if bestName then return bestName end
+    return "Fight"
+end
+
+local function PushFront(list, entry, maxCount)
+    table.insert(list, 1, entry)
+    while table.getn(list) > maxCount do
+        table.remove(list)
+    end
+end
+
+-- Last damage dealt TO a unit (for CC break attribution + death killing blow)
+-- lastHitOn[target] = { source, spell, amount, time }
+local lastHitOn = {}
+
+local function NoteLastHit(target, source, spell, amount)
+    target = NormalizeName(target)
+    source = NormalizeName(source)
+    if not target then return end
+    lastHitOn[target] = {
+        source = source or "Unknown",
+        spell = spell or "Melee",
+        amount = amount or 0,
+        time = GetTime(),
+    }
+end
+
+-- Stamp last combat activity on the current segment (for trailing-idle duration trim)
+local function NoteActivity()
+    if OM.data and OM.data.current then
+        OM.data.current.lastActivityTime = GetTime()
+    end
+end
+
+function Parser:AddDamage(source, amount, spell, target)
+    -- Detect pet contribution before ResolveSource merges onto owner.
+    -- Only mark as pet when ownership is already known from unit tokens /
+    -- SuperWoW "Pet (Owner)" form — never invent a pet for random names.
+    local isPet = false
+    if source then
+        if string.find(source, " %(.+%)$") then
+            isPet = true
+        else
+            local raw = source
+            if raw ~= "You" and raw ~= "you" then
+                if OM.GetPetOwner and OM:GetPetOwner(raw) then
+                    isPet = true
+                elseif OM.heuristicPets and OM.heuristicPets[raw] then
+                    isPet = true
+                end
+            end
+        end
+    end
+
+    source = ResolveSource(source)
+    if not source or not amount or amount <= 0 then return end
+    -- Only record damage from tracked group members (pets resolve to owners above)
+    if not OM.players[source] then
+        return
+    end
+
+    if isPet then
+        if OM.GetSetting and OM:GetSetting("mergePetDamage") then
+            spell = "Pet: Damage"
+        else
+            if not spell or spell == "" then
+                spell = "Auto Attack"
+            end
+            if string.sub(spell, 1, 5) ~= "Pet: " then
+                spell = "Pet: " .. spell
+            end
+        end
+    end
+
+    target = NormalizeName(target)
+
+    local p = EnsurePlayer(OM.data.current, source)
+    if p then
+        p.damage = p.damage + amount
+        if spell then
+            p.damageSpells[spell] = (p.damageSpells[spell] or 0) + amount
+        end
+        if target then
+            p.damageTo[target] = (p.damageTo[target] or 0) + amount
+            NoteLastHit(target, source, spell, amount)
+        end
+    end
+
+    local o = EnsurePlayer(OM.data.overall, source)
+    if o then
+        o.damage = o.damage + amount
+        if spell then
+            o.damageSpells[spell] = (o.damageSpells[spell] or 0) + amount
+        end
+        if target then
+            o.damageTo[target] = (o.damageTo[target] or 0) + amount
+        end
+    end
+    -- Interrupt abilities: combat log rarely reports "interrupted X"; count uses instead
+    if spell and Parser.IsInterruptAbility and Parser.IsInterruptAbility(spell) then
+        Parser:AddInterrupt(source, spell)
+    end
+    -- Breakable CC: first damage to a CC'd target credits the breaker
+    if target and Parser.NoteBreakableCCDamage then
+        Parser.NoteBreakableCCDamage(target, source, spell)
+    end
+    NoteActivity()
+end
+
+-- amount = full heal from the log
+-- healing field stores EFFECTIVE healing (amount - overheal)
+-- overhealing tracked separately for later tooltip %
+function Parser:AddHealing(source, amount, spell, isAbsorb, target)
+    source = ResolveSource(source)
+    if not source or not amount or amount <= 0 then return end
+    if not IsTracked(source) and not OM.players[source] then return end
+
+    local effective, over = amount, 0
+
+    if isAbsorb then
+        -- Absorbs are always fully "effective" (damage prevented)
+        effective, over = amount, 0
+    else
+        effective, over = SplitOverheal(target, amount)
+    end
+
+    local healTarget = NormalizeName(target)
+
+    local function apply(seg)
+        local p = EnsurePlayer(seg, source)
+        if not p then return end
+        p.rawHealing = (p.rawHealing or 0) + amount
+        p.overhealing = (p.overhealing or 0) + over
+        local credited = isAbsorb and amount or effective
+        if isAbsorb then
+            p.absorbs = (p.absorbs or 0) + amount
+            p.healing = (p.healing or 0) + amount -- absorbs add to effective total
+        else
+            p.healing = (p.healing or 0) + effective
+        end
+        if spell then
+            p.healSpells[spell] = (p.healSpells[spell] or 0) + credited
+        end
+        if healTarget and credited > 0 then
+            p.healingTo[healTarget] = (p.healingTo[healTarget] or 0) + credited
+        end
+    end
+
+    apply(OM.data.current)
+    apply(OM.data.overall)
+    NoteActivity()
+end
+
+function Parser:AddDamageTaken(target, amount, source, spell)
+    target = NormalizeName(target)
+    if not target or not amount or amount <= 0 then return end
+    if not OM.players[target] then return end -- only track damage taken by our group
+
+    source = NormalizeName(source) or "Unknown"
+    NoteLastHit(target, source, spell, amount)
+
+    local p = EnsurePlayer(OM.data.current, target)
+    if p then
+        p.damageTaken = p.damageTaken + amount
+        p.damageTakenBy[source] = (p.damageTakenBy[source] or 0) + amount
+    end
+
+    local o = EnsurePlayer(OM.data.overall, target)
+    if o then
+        o.damageTaken = o.damageTaken + amount
+        o.damageTakenBy[source] = (o.damageTakenBy[source] or 0) + amount
+    end
+end
+
+function Parser:AddDispel(source, what, target)
+    source = ResolveSource(source)
+    if not source then return end
+    -- Prefer group members; still allow if we somehow see it
+    if not IsTracked(source) and not OM.players[source] then return end
+    what = what or "Unknown"
+    target = NormalizeName(target)
+
+    local function apply(seg)
+        local p = EnsurePlayer(seg, source)
+        if not p then return end
+        p.dispels.count = p.dispels.count + 1
+        table.insert(p.dispels.list, what)
+        if not p.dispels.targets then
+            p.dispels.targets = {}
+        end
+        if target and target ~= "" then
+            p.dispels.targets[target] = (p.dispels.targets[target] or 0) + 1
+        end
+    end
+    apply(OM.data.current)
+    apply(OM.data.overall)
+end
+
+function Parser:AddInterrupt(source, what)
+    source = ResolveSource(source)
+    if not source then return end
+    if not IsTracked(source) and not OM.players[source] then return end
+    local p = EnsurePlayer(OM.data.current, source)
+    if p then
+        p.interrupts.count = p.interrupts.count + 1
+        table.insert(p.interrupts.list, what or "Unknown")
+    end
+    local o = EnsurePlayer(OM.data.overall, source)
+    if o then
+        o.interrupts.count = o.interrupts.count + 1
+        table.insert(o.interrupts.list, what or "Unknown")
+    end
+end
+
+-- ============================================================
+-- CC tracking (enemy-centric) + breakable CC breaks (player-centric)
+-- Combat log usually says "Enemy is afflicted by Sap" with no caster.
+-- We list enemies that were CC'd and estimate full duration.
+-- Breakable CCs (Sap/Gouge/Blind/Poly/Frost Trap): first damage to the
+-- target after the CC is applied credits the breaker.
+-- ============================================================
+
+-- Breakable (damage-breakable) hard CCs
+local BREAKABLE_CC = {
+    ["Sap"] = true,
+    ["Gouge"] = true,
+    ["Blind"] = true,
+    ["Polymorph"] = true,
+    ["Polymorph: Pig"] = true,
+    ["Polymorph: Turtle"] = true,
+    ["Freezing Trap Effect"] = true,
+    ["Freezing Trap"] = true,
+    ["Hibernate"] = true,
+    ["Shackle Undead"] = true,
+    ["Wyvern Sting"] = true,
+    ["Seduction"] = true,
+    ["Scare Beast"] = true,
+}
+
+-- activeBreakable[target] = { spell = "...", time = GetTime() }
+local activeBreakable = {}
+
+local function IsBreakableCC(spell)
+    if not spell then return false end
+    if BREAKABLE_CC[spell] then return true end
+    for name, _ in pairs(BREAKABLE_CC) do
+        if string.find(spell, name, 1, true) then return true end
+    end
+    return false
+end
+
+local function EnsureCCTargets(seg)
+    if not seg.ccTargets then
+        seg.ccTargets = {}
+    end
+    return seg.ccTargets
+end
+
+local function EnsureCCTargetEntry(seg, enemy)
+    local t = EnsureCCTargets(seg)
+    if not t[enemy] then
+        t[enemy] = { count = 0, duration = 0, list = {} }
+    end
+    return t[enemy]
+end
+
+-- Record that an enemy was CC'd (no caster required). Duration = estimate.
+function Parser:AddEnemyCC(spell, target, maxDuration)
+    target = NormalizeName(target)
+    if not target or target == "" then return end
+    -- Don't track our own group as CC targets in this mode
+    if OM.players and OM.players[target] then return end
+
+    spell = spell or "Unknown"
+    maxDuration = tonumber(maxDuration) or 0
+    if maxDuration < 0 then maxDuration = 0 end
+
+    local function apply(seg)
+        local e = EnsureCCTargetEntry(seg, target)
+        e.count = e.count + 1
+        e.duration = (e.duration or 0) + maxDuration
+        table.insert(e.list, { spell = spell, duration = maxDuration })
+    end
+    apply(OM.data.current)
+    apply(OM.data.overall)
+
+    if IsBreakableCC(spell) then
+        activeBreakable[target] = { spell = spell, time = GetTime() }
+    end
+end
+
+-- First damage to a breakable-CC'd target → credit the breaker
+local function NoteBreakableCCDamage(target, source, spell)
+    target = NormalizeName(target)
+    if not target then return end
+    local entry = activeBreakable[target]
+    if not entry then return end
+    -- Ignore tiny window noise right as CC is applied
+    if entry.time and (GetTime() - entry.time) < 0.15 then return end
+    activeBreakable[target] = nil
+    Parser:AddCCBreak(source, entry.spell, target)
+end
+Parser.NoteBreakableCCDamage = NoteBreakableCCDamage
+
+-- Compatibility wrappers
+function Parser:AddCC(source, spell, target, maxDuration)
+    Parser:AddEnemyCC(spell, target, maxDuration)
+end
+
+function Parser:FinishCC(target, spell)
+    target = NormalizeName(target)
+    if target then
+        activeBreakable[target] = nil
+    end
+end
+
+function Parser:FlushActiveCCs()
+    activeBreakable = {}
+end
+
+function Parser:AddCCBreak(breaker, ccSpell, target)
+    breaker = ResolveSource(breaker)
+    if not breaker then return end
+    if not IsTracked(breaker) and not OM.players[breaker] then return end
+    ccSpell = ccSpell or "CC"
+    target = NormalizeName(target) or "?"
+
+    local p = EnsurePlayer(OM.data.current, breaker)
+    if p then
+        p.ccBreaks.count = p.ccBreaks.count + 1
+        table.insert(p.ccBreaks.list, { spell = ccSpell, target = target })
+    end
+    local o = EnsurePlayer(OM.data.overall, breaker)
+    if o then
+        o.ccBreaks.count = o.ccBreaks.count + 1
+        table.insert(o.ccBreaks.list, { spell = ccSpell, target = target })
+    end
+end
+
+-- ============================================================
+-- Pattern sanitization (locale-independent)
+-- Converts global strings like COMBATHITSELFOTHER into matchable patterns
+-- ============================================================
+
+local sanitize_cache = {}
+local function sanitize(pattern)
+    if not pattern then return nil end
+    if sanitize_cache[pattern] then
+        return sanitize_cache[pattern]
+    end
+
+    local ret = pattern
+    -- Escape magic characters
+    ret = string.gsub(ret, "([%+%-%*%(%)%?%[%]%^])", "%%%1")
+    -- Remove capture indexes (%1$s → %s)
+    ret = string.gsub(ret, "%%%d%$", "%%")
+    -- Convert %s / %d / %c into captures
+    ret = string.gsub(ret, "%%s", "(.+)")
+    ret = string.gsub(ret, "%%d", "(%%d+)")
+    ret = string.gsub(ret, "%%c", "(.)")
+    -- Prefer non-greedy for name before number
+    ret = string.gsub(ret, "%(.%+%)%(%%d%+%)", "(.-)(%d+)")
+
+    sanitize_cache[pattern] = ret
+    return ret
+end
+
+-- ============================================================
+-- Combat log pattern tables
+-- ============================================================
+
+-- Defaults for "You" source / target
+local defaults = {
+    source = function() return playerName or UnitName("player") end,
+    target = function() return playerName or UnitName("player") end,
+    attack = "Auto Attack",
+    school = nil,
+}
+
+-- Each entry: pattern global → function that returns source, spell, target, amount, school, type
+-- type = "damage" | "heal" | "taken"
+
+local combatlog_parser = {}
+
+-- ---------- Melee hits (self) ----------
+combatlog_parser[COMBATHITSELFOTHER] = function(d, target, value)
+    -- You hit %s for %d.
+    return d.source(), d.attack, target, value, nil, "damage"
+end
+combatlog_parser[COMBATHITCRITSELFOTHER] = function(d, target, value)
+    -- You crit %s for %d.
+    return d.source(), d.attack, target, value, nil, "damage"
+end
+combatlog_parser[COMBATHITSCHOOLSELFOTHER] = function(d, target, value, school)
+    -- You hit %s for %d %s damage.
+    return d.source(), d.attack, target, value, school, "damage"
+end
+combatlog_parser[COMBATHITCRITSCHOOLSELFOTHER] = function(d, target, value, school)
+    -- You crit %s for %d %s damage.
+    return d.source(), d.attack, target, value, school, "damage"
+end
+
+-- ---------- Melee hits (other → self) ----------
+combatlog_parser[COMBATHITOTHERSELF] = function(d, source, value)
+    -- %s hits you for %d.
+    return source, d.attack, d.target(), value, nil, "taken"
+end
+combatlog_parser[COMBATHITCRITOTHERSELF] = function(d, source, value)
+    -- %s crits you for %d.
+    return source, d.attack, d.target(), value, nil, "taken"
+end
+combatlog_parser[COMBATHITSCHOOLOTHERSELF] = function(d, source, value, school)
+    -- %s hits you for %d %s damage.
+    return source, d.attack, d.target(), value, school, "taken"
+end
+combatlog_parser[COMBATHITCRITSCHOOLOTHERSELF] = function(d, source, value, school)
+    -- %s crits you for %d %s damage.
+    return source, d.attack, d.target(), value, school, "taken"
+end
+
+-- ---------- Melee hits (other → other) ----------
+combatlog_parser[COMBATHITOTHEROTHER] = function(d, source, target, value)
+    -- %s hits %s for %d.
+    return source, d.attack, target, value, nil, "damage"
+end
+combatlog_parser[COMBATHITCRITOTHEROTHER] = function(d, source, target, value)
+    -- %s crits %s for %d.
+    return source, d.attack, target, value, nil, "damage"
+end
+combatlog_parser[COMBATHITSCHOOLOTHEROTHER] = function(d, source, target, value, school)
+    -- %s hits %s for %d %s damage.
+    return source, d.attack, target, value, school, "damage"
+end
+combatlog_parser[COMBATHITCRITSCHOOLOTHEROTHER] = function(d, source, target, value, school)
+    -- %s crits %s for %d %s damage.
+    return source, d.attack, target, value, school, "damage"
+end
+
+-- ---------- Spell damage (self) ----------
+combatlog_parser[SPELLLOGSELFOTHER] = function(d, spell, target, value)
+    -- Your %s hits %s for %d.
+    return d.source(), spell, target, value, nil, "damage"
+end
+combatlog_parser[SPELLLOGCRITSELFOTHER] = function(d, spell, target, value)
+    -- Your %s crits %s for %d.
+    return d.source(), spell, target, value, nil, "damage"
+end
+combatlog_parser[SPELLLOGSCHOOLSELFOTHER] = function(d, spell, target, value, school)
+    -- Your %s hits %s for %d %s damage.
+    return d.source(), spell, target, value, school, "damage"
+end
+combatlog_parser[SPELLLOGCRITSCHOOLSELFOTHER] = function(d, spell, target, value, school)
+    -- Your %s crits %s for %d %s damage.
+    return d.source(), spell, target, value, school, "damage"
+end
+combatlog_parser[SPELLLOGSELFSELF] = function(d, spell, value)
+    -- Your %s hits you for %d.
+    return d.source(), spell, d.target(), value, nil, "damage"
+end
+combatlog_parser[SPELLLOGCRITSELFSELF] = function(d, spell, value)
+    -- Your %s crits you for %d.
+    return d.source(), spell, d.target(), value, nil, "damage"
+end
+combatlog_parser[SPELLLOGSCHOOLSELFSELF] = function(d, spell, value, school)
+    -- Your %s hits you for %d %s damage.
+    return d.source(), spell, d.target(), value, school, "damage"
+end
+combatlog_parser[SPELLLOGCRITSCHOOLSELFSELF] = function(d, spell, value, school)
+    -- Your %s crits you for %d %s damage.
+    return d.source(), spell, d.target(), value, school, "damage"
+end
+
+-- ---------- Spell damage (other → self) ----------
+combatlog_parser[SPELLLOGOTHERSELF] = function(d, source, spell, value)
+    -- %s's %s hits you for %d.
+    return source, spell, d.target(), value, nil, "taken"
+end
+combatlog_parser[SPELLLOGCRITOTHERSELF] = function(d, source, spell, value)
+    -- %s's %s crits you for %d.
+    return source, spell, d.target(), value, nil, "taken"
+end
+combatlog_parser[SPELLLOGSCHOOLOTHERSELF] = function(d, source, spell, value, school)
+    -- %s's %s hits you for %d %s damage.
+    return source, spell, d.target(), value, school, "taken"
+end
+combatlog_parser[SPELLLOGCRITSCHOOLOTHERSELF] = function(d, source, spell, value, school)
+    -- %s's %s crits you for %d %s damage.
+    return source, spell, d.target(), value, school, "taken"
+end
+
+-- ---------- Spell damage (other → other) ----------
+combatlog_parser[SPELLLOGOTHEROTHER] = function(d, source, spell, target, value)
+    -- %s's %s hits %s for %d.
+    return source, spell, target, value, nil, "damage"
+end
+combatlog_parser[SPELLLOGCRITOTHEROTHER] = function(d, source, spell, target, value)
+    -- %s's %s crits %s for %d.
+    return source, spell, target, value, nil, "damage"
+end
+combatlog_parser[SPELLLOGSCHOOLOTHEROTHER] = function(d, source, spell, target, value, school)
+    -- %s's %s hits %s for %d %s damage.
+    return source, spell, target, value, school, "damage"
+end
+combatlog_parser[SPELLLOGCRITSCHOOLOTHEROTHER] = function(d, source, spell, target, value, school)
+    -- %s's %s crits %s for %d %s damage.
+    return source, spell, target, value, school, "damage"
+end
+
+-- ---------- Periodic damage ----------
+combatlog_parser[PERIODICAURADAMAGESELFOTHER] = function(d, target, value, school, spell)
+    -- %s suffers %d %s damage from your %s.
+    return d.source(), spell, target, value, school, "damage"
+end
+combatlog_parser[PERIODICAURADAMAGEOTHEROTHER] = function(d, target, value, school, source, spell)
+    -- %s suffers %d %s damage from %s's %s.
+    return source, spell, target, value, school, "damage"
+end
+combatlog_parser[PERIODICAURADAMAGESELFSELF] = function(d, value, school, spell)
+    -- You suffer %d %s damage from your %s.
+    return d.source(), spell, d.target(), value, school, "damage"
+end
+combatlog_parser[PERIODICAURADAMAGEOTHERSELF] = function(d, value, school, source, spell)
+    -- You suffer %d %s damage from %s's %s.
+    return source, spell, d.target(), value, school, "taken"
+end
+
+-- ---------- Damage shields / reflection (Thorns, Retribution, etc.) ----------
+-- Source here is the buffed unit. We re-attribute to the applicator in ParseMessage.
+-- Typical globals:
+--   DAMAGESHIELDSELFOTHER  = "You reflect %d %s damage to %s."
+--   DAMAGESHIELDOTHERSELF  = "%s reflects %d %s damage to you."
+--   DAMAGESHIELDOTHEROTHER = "%s reflects %d %s damage to %s."
+combatlog_parser[DAMAGESHIELDSELFOTHER] = function(d, a1, a2, a3)
+    -- Captures: value, school, target  OR  value, target (no school)
+    if a3 then
+        return d.source(), "Reflect", a3, a1, a2, "reflect"
+    end
+    return d.source(), "Reflect", a2, a1, nil, "reflect"
+end
+combatlog_parser[DAMAGESHIELDOTHERSELF] = function(d, a1, a2, a3)
+    -- Captures: source, value, school  OR  source, value
+    if a3 then
+        return a1, "Reflect", d.target(), a2, a3, "reflect_taken"
+    end
+    return a1, "Reflect", d.target(), a2, nil, "reflect_taken"
+end
+combatlog_parser[DAMAGESHIELDOTHEROTHER] = function(d, a1, a2, a3, a4)
+    -- Captures: source, value, school, target  OR  source, value, target
+    if a4 then
+        return a1, "Reflect", a4, a2, a3, "reflect"
+    end
+    return a1, "Reflect", a3, a2, nil, "reflect"
+end
+
+-- ---------- Healing (direct) ----------
+combatlog_parser[HEALEDSELFSELF] = function(d, spell, value)
+    -- Your %s heals you for %d.
+    return d.source(), spell, d.target(), value, nil, "heal"
+end
+combatlog_parser[HEALEDCRITSELFSELF] = function(d, spell, value)
+    -- Your %s critically heals you for %d.
+    return d.source(), spell, d.target(), value, nil, "heal"
+end
+combatlog_parser[HEALEDSELFOTHER] = function(d, spell, target, value)
+    -- Your %s heals %s for %d.
+    return d.source(), spell, target, value, nil, "heal"
+end
+combatlog_parser[HEALEDCRITSELFOTHER] = function(d, spell, target, value)
+    -- Your %s critically heals %s for %d.
+    return d.source(), spell, target, value, nil, "heal"
+end
+combatlog_parser[HEALEDOTHERSELF] = function(d, source, spell, value)
+    -- %s's %s heals you for %d.
+    return source, spell, d.target(), value, nil, "heal"
+end
+combatlog_parser[HEALEDCRITOTHERSELF] = function(d, source, spell, value)
+    -- %s's %s critically heals you for %d.
+    return source, spell, d.target(), value, nil, "heal"
+end
+combatlog_parser[HEALEDOTHEROTHER] = function(d, source, spell, target, value)
+    -- %s's %s heals %s for %d.
+    return source, spell, target, value, nil, "heal"
+end
+combatlog_parser[HEALEDCRITOTHEROTHER] = function(d, source, spell, target, value)
+    -- %s's %s critically heals %s for %d.
+    return source, spell, target, value, nil, "heal"
+end
+
+-- ---------- Periodic healing ----------
+combatlog_parser[PERIODICAURAHEALSELFOTHER] = function(d, target, value, spell)
+    -- %s gains %d health from your %s.
+    return d.source(), spell, target, value, nil, "heal"
+end
+combatlog_parser[PERIODICAURAHEALOTHEROTHER] = function(d, target, value, source, spell)
+    -- %s gains %d health from %s's %s.
+    return source, spell, target, value, nil, "heal"
+end
+combatlog_parser[PERIODICAURAHEALSELFSELF] = function(d, value, spell)
+    -- You gain %d health from your %s.
+    return d.source(), spell, d.target(), value, nil, "heal"
+end
+combatlog_parser[PERIODICAURAHEALOTHERSELF] = function(d, value, source, spell)
+    -- You gain %d health from %s's %s.
+    return source, spell, d.target(), value, nil, "heal"
+end
+
+-- ============================================================
+-- Event → pattern list mapping
+-- ============================================================
+
+local combatlog_strings = {
+    -- Melee
+    ["Hit Damage (self vs. other)"] = {
+        COMBATHITSELFOTHER, COMBATHITSCHOOLSELFOTHER,
+        COMBATHITCRITSELFOTHER, COMBATHITCRITSCHOOLSELFOTHER,
+    },
+    ["Hit Damage (other vs. self)"] = {
+        COMBATHITOTHERSELF, COMBATHITCRITOTHERSELF,
+        COMBATHITSCHOOLOTHERSELF, COMBATHITCRITSCHOOLOTHERSELF,
+    },
+    ["Hit Damage (other vs. other)"] = {
+        COMBATHITOTHEROTHER, COMBATHITCRITOTHEROTHER,
+        COMBATHITSCHOOLOTHEROTHER, COMBATHITCRITSCHOOLOTHEROTHER,
+    },
+    -- Spells
+    ["Spell Damage (self)"] = {
+        SPELLLOGSELFOTHER, SPELLLOGCRITSELFOTHER,
+        SPELLLOGSCHOOLSELFOTHER, SPELLLOGCRITSCHOOLSELFOTHER,
+        SPELLLOGSELFSELF, SPELLLOGCRITSELFSELF,
+        SPELLLOGSCHOOLSELFSELF, SPELLLOGCRITSCHOOLSELFSELF,
+    },
+    ["Spell Damage (other vs. self)"] = {
+        SPELLLOGOTHERSELF, SPELLLOGCRITOTHERSELF,
+        SPELLLOGSCHOOLOTHERSELF, SPELLLOGCRITSCHOOLOTHERSELF,
+    },
+    ["Spell Damage (other vs. other)"] = {
+        SPELLLOGOTHEROTHER, SPELLLOGCRITOTHEROTHER,
+        SPELLLOGSCHOOLOTHEROTHER, SPELLLOGCRITSCHOOLOTHEROTHER,
+    },
+    -- Periodic / DoTs
+    ["Periodic Damage"] = {
+        PERIODICAURADAMAGESELFOTHER, PERIODICAURADAMAGEOTHEROTHER,
+        PERIODICAURADAMAGESELFSELF, PERIODICAURADAMAGEOTHERSELF,
+    },
+    -- Shields / Reflect
+    ["Shield Damage"] = {
+        DAMAGESHIELDSELFOTHER, DAMAGESHIELDOTHERSELF, DAMAGESHIELDOTHEROTHER,
+    },
+    -- Healing
+    ["Heal (self)"] = {
+        HEALEDSELFSELF, HEALEDCRITSELFSELF,
+        HEALEDSELFOTHER, HEALEDCRITSELFOTHER,
+    },
+    ["Heal (other)"] = {
+        HEALEDOTHERSELF, HEALEDCRITOTHERSELF,
+        HEALEDOTHEROTHER, HEALEDCRITOTHEROTHER,
+    },
+    ["Periodic Heal"] = {
+        PERIODICAURAHEALSELFOTHER, PERIODICAURAHEALOTHEROTHER,
+        PERIODICAURAHEALSELFSELF, PERIODICAURAHEALOTHERSELF,
+    },
+}
+
+local combatlog_events = {
+    -- Melee damage
+    ["CHAT_MSG_COMBAT_SELF_HITS"]              = combatlog_strings["Hit Damage (self vs. other)"],
+    ["CHAT_MSG_COMBAT_CREATURE_VS_SELF_HITS"]  = combatlog_strings["Hit Damage (other vs. self)"],
+    ["CHAT_MSG_COMBAT_PARTY_HITS"]             = combatlog_strings["Hit Damage (other vs. other)"],
+    ["CHAT_MSG_COMBAT_FRIENDLYPLAYER_HITS"]    = combatlog_strings["Hit Damage (other vs. other)"],
+    ["CHAT_MSG_COMBAT_HOSTILEPLAYER_HITS"]     = combatlog_strings["Hit Damage (other vs. other)"],
+    ["CHAT_MSG_COMBAT_CREATURE_VS_CREATURE_HITS"] = combatlog_strings["Hit Damage (other vs. other)"],
+    ["CHAT_MSG_COMBAT_CREATURE_VS_PARTY_HITS"] = combatlog_strings["Hit Damage (other vs. other)"],
+    ["CHAT_MSG_COMBAT_PET_HITS"]               = combatlog_strings["Hit Damage (other vs. other)"],
+
+    -- Spell damage
+    ["CHAT_MSG_SPELL_SELF_DAMAGE"]             = combatlog_strings["Spell Damage (self)"],
+    ["CHAT_MSG_SPELL_CREATURE_VS_SELF_DAMAGE"] = combatlog_strings["Spell Damage (other vs. self)"],
+    ["CHAT_MSG_SPELL_PARTY_DAMAGE"]            = combatlog_strings["Spell Damage (other vs. other)"],
+    ["CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE"]   = combatlog_strings["Spell Damage (other vs. other)"],
+    ["CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE"]    = combatlog_strings["Spell Damage (other vs. other)"],
+    ["CHAT_MSG_SPELL_CREATURE_VS_CREATURE_DAMAGE"] = combatlog_strings["Spell Damage (other vs. other)"],
+    ["CHAT_MSG_SPELL_CREATURE_VS_PARTY_DAMAGE"]= combatlog_strings["Spell Damage (other vs. other)"],
+    ["CHAT_MSG_SPELL_PET_DAMAGE"]              = combatlog_strings["Spell Damage (other vs. other)"],
+
+    -- Damage shields
+    ["CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF"]   = combatlog_strings["Shield Damage"],
+    ["CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS"] = combatlog_strings["Shield Damage"],
+
+    -- Periodic damage
+    ["CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE"]    = combatlog_strings["Periodic Damage"],
+    ["CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE"]   = combatlog_strings["Periodic Damage"],
+    ["CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE"] = combatlog_strings["Periodic Damage"],
+    ["CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE"]  = combatlog_strings["Periodic Damage"],
+    ["CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE"]= combatlog_strings["Periodic Damage"],
+
+    -- Healing
+    ["CHAT_MSG_SPELL_SELF_BUFF"]               = combatlog_strings["Heal (self)"],
+    ["CHAT_MSG_SPELL_PARTY_BUFF"]              = combatlog_strings["Heal (other)"],
+    ["CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF"]     = combatlog_strings["Heal (other)"],
+    ["CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF"]      = combatlog_strings["Heal (other)"],
+
+    -- Periodic healing
+    ["CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS"]     = combatlog_strings["Periodic Heal"],
+    ["CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS"]    = combatlog_strings["Periodic Heal"],
+    ["CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS"] = combatlog_strings["Periodic Heal"],
+    ["CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS"]  = combatlog_strings["Periodic Heal"],
+}
+
+-- ============================================================
+-- Aura gain / fade parsing (reflection tracking)
+-- ============================================================
+
+local function HandleAuraGain(target, spell)
+    target = NormalizeName(target)
+    if not target or not spell then return end
+
+    -- Absorb shields only (reflection caster assignment removed)
+    if IsAbsorbShield(spell) then
+        local applicator = GetRecentAbsorbCaster(spell)
+        if not applicator and OM.players[target] then
+            local class = OM.players[target].class
+            if spell == "Power Word: Shield" and class == "PRIEST" then
+                applicator = target
+            elseif (spell == "Ice Barrier" or spell == "Mana Shield" or spell == "Frost Ward" or spell == "Fire Ward") and class == "MAGE" then
+                applicator = target
+            elseif spell == "Sacrifice" and class == "WARLOCK" then
+                applicator = target
+            end
+        end
+        applicator = applicator or target
+        SetAbsorbAura(target, spell, applicator)
+        if applicator then
+            NoteRecentAbsorbCaster(spell, applicator)
+        end
+    end
+end
+
+local function HandleAuraFade(target, spell)
+    target = NormalizeName(target)
+    if not target or not spell then return end
+    if IsAbsorbShield(spell) then
+        ClearAbsorbAura(target, spell)
+    end
+end
+
+local function ParseAuraMessage(event, message)
+    if not message or message == "" then return end
+
+    -- Self gain
+    if AURAADDEDSELFHELPFUL then
+        local regex = sanitize(AURAADDEDSELFHELPFUL)
+        if regex then
+            local _, _, s = string.find(message, regex)
+            if s and IsAbsorbShield(s) then
+                HandleAuraGain(playerName, s)
+                return
+            end
+        end
+    end
+
+    -- Other gain
+    if AURAADDEDOTHERHELPFUL then
+        local regex = sanitize(AURAADDEDOTHERHELPFUL)
+        if regex then
+            local _, _, target, s = string.find(message, regex)
+            if target and s and IsAbsorbShield(s) then
+                HandleAuraGain(target, s)
+                return
+            end
+        end
+    end
+
+    -- Fallback plain-text gain
+    local _, _, s = string.find(message, "^You gain ([%.%w%s%'%-]+)%.?$")
+    if s and IsAbsorbShield(s) then
+        HandleAuraGain(playerName, s)
+        return
+    end
+
+    local _, _, target, s2 = string.find(message, "^(.+) gains ([%.%w%s%'%-]+)%.?$")
+    if target and s2 and IsAbsorbShield(s2) then
+        HandleAuraGain(target, s2)
+        return
+    end
+
+    -- Fade via globals
+    if AURAREMOVEDSELF then
+        local regex = sanitize(AURAREMOVEDSELF)
+        if regex then
+            local _, _, s = string.find(message, regex)
+            if s and IsAbsorbShield(s) then
+                HandleAuraFade(playerName, s)
+                return
+            end
+        end
+    end
+
+    if AURAREMOVEDOTHER then
+        local regex = sanitize(AURAREMOVEDOTHER)
+        if regex then
+            local _, _, s, target = string.find(message, regex)
+            if s and target and IsAbsorbShield(s) then
+                HandleAuraFade(target, s)
+                return
+            end
+        end
+    end
+
+    -- Fallback fade
+    local _, _, s3 = string.find(message, "^([%.%w%s%'%-]+) fades from you%.?$")
+    if s3 and IsAbsorbShield(s3) then
+        HandleAuraFade(playerName, s3)
+        return
+    end
+
+    local _, _, s4, target2 = string.find(message, "^([%.%w%s%'%-]+) fades from (.+)%.?$")
+    if s4 and target2 and IsAbsorbShield(s4) then
+        HandleAuraFade(target2, s4)
+        return
+    end
+end
+
+-- ============================================================
+-- Interrupt & Dispel tracking
+-- ============================================================
+
+-- True interrupts only (not stuns/CCs — those go in the CC mode later)
+local INTERRUPT_SPELLS = {
+    ["Kick"] = true,
+    ["Pummel"] = true,
+    ["Shield Bash"] = true,
+    ["Counterspell"] = true,
+    ["Earth Shock"] = true,
+    ["Spell Lock"] = true,
+    ["Silence"] = true,
+}
+
+-- Dispel / cleanse abilities
+local DISPEL_SPELLS = {
+    ["Dispel Magic"] = true,
+    ["Cleanse"] = true,
+    ["Purify"] = true,
+    ["Remove Curse"] = true,
+    ["Remove Lesser Curse"] = true,
+    ["Cure Disease"] = true,
+    ["Abolish Disease"] = true,
+    ["Cure Poison"] = true,
+    ["Abolish Poison"] = true,
+    ["Devour Magic"] = true,
+    ["Purge"] = true,
+    ["Poison Cleansing Totem"] = true,
+    ["Disease Cleansing Totem"] = true,
+    ["Powerful Anti-Venom"] = true,
+    ["Restoration"] = true,          -- enchanted item / some effects
+    ["Purification"] = true,
+    ["Purification Potion"] = true,
+    ["Restorative Potion"] = true,
+}
+
+local function IsInterruptSpell(spell)
+    if not spell then return false end
+    if INTERRUPT_SPELLS[spell] then return true end
+    for name, _ in pairs(INTERRUPT_SPELLS) do
+        if string.find(spell, name, 1, true) then return true end
+    end
+    return false
+end
+-- Exposed for AddDamage (defined earlier in the file)
+Parser.IsInterruptAbility = IsInterruptSpell
+
+local function IsDispelSpell(spell)
+    if not spell then return false end
+    if DISPEL_SPELLS[spell] then return true end
+    for name, _ in pairs(DISPEL_SPELLS) do
+        if string.find(spell, name, 1, true) then return true end
+    end
+    return false
+end
+
+-- Dispel matching: combat log order is unreliable. The fade line can appear
+-- before or after "X casts Purify". Keep short buffers of both and pair the
+-- closest fade to each cast (prefer same target when known).
+local PENDING_DISPEL_WINDOW = 1.5
+local recentDispelFades = {}  -- { { spell, target, time }, ... }
+local pendingDispelCasts = {} -- { { caster, target, time }, ... }
+
+local function PruneDispelBuffers(now)
+    now = now or GetTime()
+    local i
+    for i = table.getn(recentDispelFades), 1, -1 do
+        if (now - (recentDispelFades[i].time or 0)) > PENDING_DISPEL_WINDOW then
+            table.remove(recentDispelFades, i)
+        end
+    end
+    for i = table.getn(pendingDispelCasts), 1, -1 do
+        if (now - (pendingDispelCasts[i].time or 0)) > PENDING_DISPEL_WINDOW then
+            table.remove(pendingDispelCasts, i)
+        end
+    end
+end
+
+local function ClearDispelBuffers()
+    recentDispelFades = {}
+    pendingDispelCasts = {}
+end
+
+-- Score a fade/cast pair; lower is better. nil = out of window.
+local function DispelPairScore(castTime, castTarget, fadeTime, fadeTarget)
+    local dist = castTime - fadeTime
+    if dist < 0 then dist = -dist end
+    if dist > PENDING_DISPEL_WINDOW then return nil end
+    -- Prefer same target when both sides known
+    local ct = castTarget and NormalizeName(castTarget) or nil
+    local ft = fadeTarget and NormalizeName(fadeTarget) or nil
+    if ct and ft and ct == ft then
+        return dist - 0.5
+    end
+    return dist
+end
+
+local function NoteDispelCast(caster, target)
+    caster = ResolveSource(caster)
+    if not caster then return end
+    if not IsTracked(caster) and not OM.players[caster] then return end
+    target = target and NormalizeName(target) or nil
+    local now = GetTime()
+    PruneDispelBuffers(now)
+
+    -- Match the closest buffered fade (may have arrived before the cast line)
+    local bestIdx, bestScore = nil, nil
+    local i, fade
+    for i, fade in ipairs(recentDispelFades) do
+        local score = DispelPairScore(now, target, fade.time, fade.target)
+        if score and (not bestScore or score < bestScore) then
+            bestScore = score
+            bestIdx = i
+        end
+    end
+    if bestIdx then
+        local fade = recentDispelFades[bestIdx]
+        table.remove(recentDispelFades, bestIdx)
+        Parser:AddDispel(caster, fade.spell or "Unknown", fade.target or target)
+        return
+    end
+
+    -- No nearby fade yet — wait for one
+    table.insert(pendingDispelCasts, {
+        caster = caster,
+        target = target,
+        time = now,
+    })
+end
+
+local function TryCreditPendingDispel(fadedSpell, target)
+    fadedSpell = fadedSpell or "Unknown"
+    target = target and NormalizeName(target) or nil
+    local now = GetTime()
+    PruneDispelBuffers(now)
+
+    -- Match the closest pending cast (cast may have arrived before the fade)
+    local bestIdx, bestScore = nil, nil
+    local i, cast
+    for i, cast in ipairs(pendingDispelCasts) do
+        local score = DispelPairScore(cast.time, cast.target, now, target)
+        if score and (not bestScore or score < bestScore) then
+            bestScore = score
+            bestIdx = i
+        end
+    end
+    if bestIdx then
+        local cast = pendingDispelCasts[bestIdx]
+        table.remove(pendingDispelCasts, bestIdx)
+        Parser:AddDispel(cast.caster, fadedSpell, target or cast.target)
+        return true
+    end
+
+    -- No nearby cast yet — buffer the fade for a later cast line
+    table.insert(recentDispelFades, {
+        spell = fadedSpell,
+        target = target,
+        time = now,
+    })
+    return false
+end
+
+--[[
+  Interrupt combat log forms (English, common variants):
+    "You interrupt Mob's Fireball."
+    "You interrupt Mob's Fireball with Kick."
+    "Bob interrupts Mob's Frostbolt."
+    "Bob's Kick interrupts Mob's Heal."
+    "Your Counterspell interrupts Mob's Pyroblast."
+
+  Dispel combat log forms:
+    "You remove Curse of Weakness from Bob."
+    "You purify Bob."
+    "Bob's Cleanse removes Disease from You."
+    "Your Dispel Magic removes Power Word: Shield from Mob."
+    "Bob removes Shadow Word: Pain from You."
+    "You cast Dispel Magic on Mob."
+]]
+
+local function ParseInterruptMessage(message)
+    if not message then return end
+
+    -- "You interrupt TARGET's SPELL."
+    local _, _, target, interrupted = string.find(message, "^You interrupt (.+)'s (.+)%.?$")
+    if target and interrupted then
+        -- Strip optional " with Kick" suffix if present inside interrupted
+        local clean = interrupted
+        local _, _, spellOnly, withSpell = string.find(interrupted, "^(.+) with (.+)$")
+        if spellOnly then
+            clean = spellOnly
+        end
+        Parser:AddInterrupt(playerName, clean)
+        return true
+    end
+
+    -- "Your SPELL interrupts TARGET's INTERRUPTED."
+    local _, _, sourceSpell, target2, interrupted2 = string.find(message, "^Your (.+) interrupts (.+)'s (.+)%.?$")
+    if sourceSpell and target2 and interrupted2 then
+        Parser:AddInterrupt(playerName, interrupted2)
+        return true
+    end
+
+    -- "SOURCE interrupts TARGET's SPELL."
+    local _, _, source, target3, interrupted3 = string.find(message, "^(.+) interrupts (.+)'s (.+)%.?$")
+    if source and target3 and interrupted3 then
+        -- Avoid matching "Your X interrupts..." again
+        if source ~= "Your" and not string.find(source, "^Your ") then
+            Parser:AddInterrupt(source, interrupted3)
+            return true
+        end
+    end
+
+    -- "SOURCE's SPELL interrupts TARGET's INTERRUPTED."
+    local _, _, source2, sourceSpell2, target4, interrupted4 =
+        string.find(message, "^(.+)'s (.+) interrupts (.+)'s (.+)%.?$")
+    if source2 and sourceSpell2 and target4 and interrupted4 then
+        if IsInterruptSpell(sourceSpell2) or true then
+            Parser:AddInterrupt(source2, interrupted4)
+            return true
+        end
+    end
+
+    return false
+end
+
+local function ParseDispelMessage(message)
+    if not message then return false end
+
+    -- Cast forms (with optional target): fade may appear before or after these.
+    -- "You cast SPELL on TARGET." / "You cast SPELL."
+    local _, _, castSpell, castTarget = string.find(message, "^You cast (.+) on (.+)%.?$")
+    if castSpell and IsDispelSpell(castSpell) then
+        NoteDispelCast(playerName, castTarget)
+        return true
+    end
+    local _, _, castSpellOnly = string.find(message, "^You cast (.+)%.?$")
+    if castSpellOnly and IsDispelSpell(castSpellOnly) then
+        NoteDispelCast(playerName, nil)
+        return true
+    end
+    -- "SOURCE casts SPELL on TARGET." / "SOURCE casts SPELL."
+    local _, _, castSrc, castSpell2, castTarget2 = string.find(message, "^(.+) casts (.+) on (.+)%.?$")
+    if castSrc and castSpell2 and IsDispelSpell(castSpell2) then
+        if castSrc ~= "You" and not string.find(castSrc, "^Your ") then
+            NoteDispelCast(castSrc, castTarget2)
+            return true
+        end
+    end
+    local _, _, castSrc2, castSpell3 = string.find(message, "^(.+) casts (.+)%.?$")
+    if castSrc2 and castSpell3 and IsDispelSpell(castSpell3) then
+        if castSrc2 ~= "You" and not string.find(castSrc2, "^Your ") then
+            NoteDispelCast(castSrc2, nil)
+            return true
+        end
+    end
+    local _, _, yourSpell = string.find(message, "^Your (.+) is cast%.?$")
+    if yourSpell and IsDispelSpell(yourSpell) then
+        NoteDispelCast(playerName, nil)
+        return true
+    end
+
+    -- Direct remove forms still work as a fallback (credit immediately)
+    -- "You remove SPELL from TARGET."
+    local _, _, removed, target = string.find(message, "^You remove (.+) from (.+)%.?$")
+    if removed and target then
+        Parser:AddDispel(playerName, removed, target)
+        return true
+    end
+
+    -- "You purify TARGET." / "You cleanse TARGET."
+    local _, _, action, target2 = string.find(message, "^You (%w+) (.+)%.?$")
+    if action and target2 then
+        local al = string.lower(action)
+        if al == "purify" or al == "cleanse" or al == "cure" or al == "purge" then
+            NoteDispelCast(playerName)
+            return true
+        end
+    end
+
+    -- "SOURCE's SPELL removes REMOVED from TARGET."
+    local _, _, source, sourceSpell, removed2, target3 =
+        string.find(message, "^(.+)'s (.+) removes (.+) from (.+)%.?$")
+    if source and sourceSpell and removed2 and target3 then
+        if IsDispelSpell(sourceSpell) then
+            Parser:AddDispel(source, removed2, target3)
+            return true
+        end
+    end
+
+    -- "SOURCE removes REMOVED from TARGET."
+    local _, _, source2, removed3, target4 = string.find(message, "^(.+) removes (.+) from (.+)%.?$")
+    if source2 and removed3 and target4 then
+        if source2 ~= "You" and not string.find(source2, "^Your ") then
+            Parser:AddDispel(source2, removed3, target4)
+            return true
+        end
+    end
+
+    return false
+end
+
+local function ParseInterruptOrDispel(event, message)
+    if not message or message == "" then return false end
+
+    local lower = string.lower(message)
+    if string.find(lower, "interrupt", 1, true) then
+        if ParseInterruptMessage(message) then return true end
+    end
+    -- Dispel casts + direct remove lines
+    if string.find(lower, "cast", 1, true)
+    or string.find(lower, "remove", 1, true)
+    or string.find(lower, "purify", 1, true)
+    or string.find(lower, "cleanse", 1, true)
+    or string.find(lower, "cure", 1, true)
+    or string.find(lower, "dispel", 1, true)
+    or string.find(lower, "purge", 1, true)
+    or string.find(lower, "devour", 1, true)
+    or string.find(lower, "totem", 1, true) then
+        if ParseDispelMessage(message) then return true end
+    end
+    -- Fade lines: credit pending dispel if armed
+    if string.find(lower, "fades from", 1, true) then
+        local _, _, faded, tgt = string.find(message, "^(.+) fades from (.+)%.?$")
+        if faded and tgt then
+            if tgt == "you" or tgt == "You" then tgt = playerName end
+            if TryCreditPendingDispel(faded, tgt) then
+                return true
+            end
+        end
+        local _, _, faded2 = string.find(message, "^(.+) fades from you%.?$")
+        if faded2 then
+            if TryCreditPendingDispel(faded2, playerName) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- ============================================================
+-- Hard CC tracking
+-- Stuns, fears, saps, polymorph, sleeps, etc.
+-- NO roots, slows, or snares.
+-- Duration values are base estimates (talents/DR not modeled).
+-- ============================================================
+
+local HARD_CC_SPELLS = {
+    -- Rogue
+    ["Sap"]              = 45,  -- rank-dependent; use high rank estimate
+    ["Cheap Shot"]       = 4,
+    ["Kidney Shot"]      = 4,   -- combo-point dependent; ~4s average
+    ["Gouge"]            = 4,
+    ["Blind"]            = 10,
+
+    -- Warrior
+    ["Concussion Blow"]  = 5,
+    ["Charge Stun"]      = 1,
+    ["Intercept Stun"]   = 1,
+    ["Intimidating Shout"] = 8,
+
+    -- Mage
+    ["Polymorph"]        = 50,  -- rank-dependent; sheep
+    ["Polymorph: Pig"]   = 50,
+    ["Polymorph: Turtle"]= 50,
+    ["Impact"]           = 2,
+
+    -- Warlock
+    ["Fear"]             = 20,
+    ["Howl of Terror"]   = 15,
+    ["Seduction"]        = 15,
+    ["Death Coil"]       = 3,   -- horror
+    ["Pyroclasm"]        = 3,
+
+    -- Priest
+    ["Psychic Scream"]   = 8,
+    ["Blackout"]         = 3,
+
+    -- Druid
+    ["Bash"]             = 3,
+    ["Pounce"]           = 3,
+    ["Hibernate"]        = 40,
+
+    -- Paladin
+    ["Hammer of Justice"]= 6,
+    ["Repentance"]       = 6,
+
+    -- Hunter
+    ["Scatter Shot"]     = 4,
+    ["Intimidation"]     = 3,
+    ["Wyvern Sting"]     = 12,  -- sleep
+    ["Freezing Trap Effect"] = 20,
+    ["Freezing Trap"]    = 20,
+    ["Scare Beast"]      = 20,
+
+    -- Other / racial / items
+    ["War Stomp"]        = 2,
+    ["Tidal Charm"]      = 3,
+    ["Reckless Charge"]  = 30,
+    ["Shackle Undead"]   = 50,
+}
+
+local function GetHardCCDuration(spell)
+    if not spell then return nil end
+    if HARD_CC_SPELLS[spell] then
+        return HARD_CC_SPELLS[spell]
+    end
+    for name, dur in pairs(HARD_CC_SPELLS) do
+        if string.find(spell, name, 1, true) then
+            return dur
+        end
+    end
+    return nil
+end
+
+local function IsHardCCSpell(spell)
+    return GetHardCCDuration(spell) ~= nil
+end
+
+--[[
+  Common affliction / apply forms:
+    "You afflict Mob with Cheap Shot."
+    "Bob afflicts Mob with Polymorph."
+    "Mob is afflicted by Sap."
+    "Your Polymorph was resisted by Mob."  -- ignore resists
+]]
+
+local function ParseCCMessage(message)
+    if not message then return false end
+    local lower = string.lower(message)
+    -- Ignore resists / immunes / misses
+    if string.find(lower, "resist", 1, true)
+    or string.find(lower, "immune", 1, true)
+    or string.find(lower, "miss", 1, true)
+    or string.find(lower, "dodge", 1, true)
+    or string.find(lower, "parry", 1, true)
+    or string.find(lower, "block", 1, true)
+    or string.find(lower, "evade", 1, true)
+    or string.find(lower, "absorb", 1, true)
+    or string.find(lower, "fail", 1, true) then
+        return false
+    end
+
+    -- Primary form (no caster): "TARGET is afflicted by SPELL."
+    local _, _, target, spell = string.find(message, "^(.+) is afflicted by (.+)%.?$")
+    if target and spell then
+        if target == "you" or target == "You" then
+            target = playerName
+        end
+        local dur = GetHardCCDuration(spell)
+        if dur then
+            Parser:AddEnemyCC(spell, target, dur)
+            return true
+        end
+        return false
+    end
+
+    -- "You afflict TARGET with SPELL."
+    local _, _, target2, spell2 = string.find(message, "^You afflict (.+) with (.+)%.?$")
+    if target2 and spell2 then
+        local dur = GetHardCCDuration(spell2)
+        if dur then
+            Parser:AddEnemyCC(spell2, target2, dur)
+            return true
+        end
+        return false
+    end
+
+    -- "SOURCE afflicts TARGET with SPELL."
+    local _, _, source, target3, spell3 = string.find(message, "^(.+) afflicts (.+) with (.+)%.?$")
+    if source and target3 and spell3 then
+        if source ~= "Your" and not string.find(source, "^Your ") then
+            local dur = GetHardCCDuration(spell3)
+            if dur then
+                Parser:AddEnemyCC(spell3, target3, dur)
+                return true
+            end
+        end
+        return false
+    end
+
+    -- "Your SPELL afflicts TARGET."
+    local _, _, spell4, target4 = string.find(message, "^Your (.+) afflicts (.+)%.?$")
+    if spell4 and target4 then
+        local dur = GetHardCCDuration(spell4)
+        if dur then
+            Parser:AddEnemyCC(spell4, target4, dur)
+            return true
+        end
+    end
+
+    return false
+end
+
+local function ParseCCFadeMessage(message)
+    if not message then return false end
+
+    -- "SPELL fades from TARGET."
+    local _, _, spell, target = string.find(message, "^(.+) fades from (.+)%.?$")
+    if spell and target then
+        if target == "you" or target == "You" then
+            target = playerName
+        end
+        if IsHardCCSpell(spell) then
+            Parser:FinishCC(target, spell)
+            return true
+        end
+        -- Substring match against known hard CCs
+        for name, _ in pairs(HARD_CC_SPELLS) do
+            if string.find(spell, name, 1, true) then
+                Parser:FinishCC(target, name)
+                return true
+            end
+        end
+    end
+
+    -- "SPELL fades from you."
+    local _, _, spell2 = string.find(message, "^(.+) fades from you%.?$")
+    if spell2 then
+        if IsHardCCSpell(spell2) then
+            Parser:FinishCC(playerName, spell2)
+            return true
+        end
+        for name, _ in pairs(HARD_CC_SPELLS) do
+            if string.find(spell2, name, 1, true) then
+                Parser:FinishCC(playerName, name)
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function ParseHardCC(event, message)
+    if not message or message == "" then return false end
+    local lower = string.lower(message)
+
+    -- Fades / breaks first
+    if string.find(lower, "fades from", 1, true) then
+        if ParseCCFadeMessage(message) then
+            return true
+        end
+    end
+
+    if string.find(lower, "afflict", 1, true)
+    or string.find(lower, "stun", 1, true)
+    or string.find(lower, "polymorph", 1, true)
+    or string.find(lower, "fear", 1, true)
+    or string.find(lower, "sap", 1, true)
+    or string.find(lower, "seduction", 1, true)
+    or string.find(lower, "hibernate", 1, true)
+    or string.find(lower, "shackle", 1, true)
+    or string.find(lower, "repentance", 1, true)
+    or string.find(lower, "blind", 1, true)
+    or string.find(lower, "scatter", 1, true)
+    or string.find(lower, "wyvern", 1, true)
+    or string.find(lower, "freezing trap", 1, true) then
+        return ParseCCMessage(message)
+    end
+    return false
+end
+
+-- ============================================================
+-- Absorb message parsing
+-- Credits absorbed damage as healing to the shield provider.
+-- ============================================================
+
+local function CreditAbsorb(buffedUnit, amount, shieldName)
+    amount = tonumber(amount)
+    if not amount or amount <= 0 then return end
+    buffedUnit = NormalizeName(buffedUnit) or buffedUnit
+
+    local applicator, spell = GetAbsorbApplicator(buffedUnit)
+    local credit = applicator or buffedUnit
+    local label = shieldName or spell or "Absorb"
+
+    -- Class self-shield heuristics when applicator unknown
+    if not applicator and OM.players[buffedUnit] then
+        local class = OM.players[buffedUnit].class
+        if class == "PRIEST" or class == "MAGE" or class == "WARLOCK" then
+            credit = buffedUnit
+        end
+    end
+
+    Parser:AddHealing(credit, amount, label, true)
+end
+
+-- Extract "(N absorbed)" trailer; return clean message + absorb amount
+local function ExtractAbsorbTrailer(message)
+    if not message then return message, nil end
+    local absorbAmount = nil
+
+    -- Use global ABSORB_TRAILER if available (e.g. " (%d+ absorbed)")
+    if ABSORB_TRAILER then
+        local regex = sanitize(ABSORB_TRAILER)
+        if regex then
+            local _, _, amt = string.find(message, regex)
+            if amt then
+                absorbAmount = tonumber(amt)
+                message = string.gsub(message, regex, "")
+            end
+        end
+    end
+
+    -- Fallback English patterns
+    if not absorbAmount then
+        local _, _, amt = string.find(message, "%((%d+) absorbed%)")
+        if amt then
+            absorbAmount = tonumber(amt)
+            message = string.gsub(message, "%s*%((%d+) absorbed%)", "")
+        end
+    end
+    if not absorbAmount then
+        local _, _, amt = string.find(message, "%((%d+) Absorbed%)")
+        if amt then
+            absorbAmount = tonumber(amt)
+            message = string.gsub(message, "%s*%((%d+) Absorbed%)", "")
+        end
+    end
+
+    return message, absorbAmount
+end
+
+-- Plain-text reflection fallback (when global DAMAGESHIELD patterns miss)
+-- Credits the unit wearing the buff; no caster reassignment.
+local function ParseReflectMessage(message)
+    if not message then return false end
+    local lower = string.lower(message)
+    if not string.find(lower, "reflect", 1, true) then
+        return false
+    end
+
+    local absorbAmt = nil
+    message, absorbAmt = ExtractAbsorbTrailer(message)
+
+    -- "You reflect AMOUNT [school] damage to TARGET."
+    local _, _, amount, target = string.find(message, "^You reflect (%d+) [%w%s]*damage to (.+)%.?$")
+    if not amount then
+        _, _, amount, target = string.find(message, "^You reflect (%d+) damage to (.+)%.?$")
+    end
+    if amount and target then
+        amount = tonumber(amount)
+        if amount and amount > 0 then
+            Parser:AddDamage(playerName, amount, "Reflect", target)
+        end
+        if absorbAmt and absorbAmt > 0 then
+            CreditAbsorb(target, absorbAmt, "Absorb")
+        end
+        return true
+    end
+
+    -- "SOURCE reflects AMOUNT damage to you."
+    local _, _, source, amount2 = string.find(message, "^(.+) reflects (%d+) [%w%s]*damage to you%.?$")
+    if not source then
+        _, _, source, amount2 = string.find(message, "^(.+) reflects (%d+) damage to you%.?$")
+    end
+    if source and amount2 then
+        amount2 = tonumber(amount2)
+        if amount2 and amount2 > 0 then
+            Parser:AddDamageTaken(playerName, amount2, source)
+        end
+        if absorbAmt and absorbAmt > 0 then
+            CreditAbsorb(playerName, absorbAmt, "Absorb")
+        end
+        return true
+    end
+
+    -- "SOURCE reflects AMOUNT damage to TARGET."
+    local _, _, source2, amount3, target2 = string.find(message, "^(.+) reflects (%d+) [%w%s]*damage to (.+)%.?$")
+    if not source2 then
+        _, _, source2, amount3, target2 = string.find(message, "^(.+) reflects (%d+) damage to (.+)%.?$")
+    end
+    if source2 and amount3 and target2 then
+        amount3 = tonumber(amount3)
+        if amount3 and amount3 > 0 then
+            Parser:AddDamage(source2, amount3, "Reflect", target2)
+            if OM.players[NormalizeName(target2)] then
+                Parser:AddDamageTaken(target2, amount3, source2)
+            end
+        end
+        if absorbAmt and absorbAmt > 0 then
+            CreditAbsorb(target2, absorbAmt, "Absorb")
+        end
+        return true
+    end
+
+    return false
+end
+
+
+local function ParseAbsorbMessage(message)
+    if not message then return false end
+    local lower = string.lower(message)
+    if not string.find(lower, "absorb", 1, true) then
+        return false
+    end
+
+    -- "You absorb AMOUNT damage." / "You absorb AMOUNT SCHOOL damage."
+    local _, _, amount = string.find(message, "^You absorb (%d+)")
+    if amount then
+        CreditAbsorb(playerName, amount, "Absorb")
+        return true
+    end
+
+    -- "TARGET absorbs AMOUNT damage." / "TARGET absorbs AMOUNT SCHOOL damage."
+    local _, _, target, amount2 = string.find(message, "^(.+) absorbs (%d+)")
+    if target and amount2 then
+        if target ~= "You" and not string.find(target, "^Your ") then
+            CreditAbsorb(target, amount2, "Absorb")
+            return true
+        end
+    end
+
+    -- "Your SPELL is absorbed by TARGET."
+    local _, _, spell, target2 = string.find(message, "^Your (.+) is absorbed by (.+)%.?$")
+    if spell and target2 then
+        -- Outgoing spell fully absorbed — no healing credit; damage was prevented on enemy
+        return true
+    end
+
+    -- "SOURCE's SPELL is absorbed by TARGET."
+    local _, _, source, spell2, target3 = string.find(message, "^(.+)'s (.+) is absorbed by (.+)%.?$")
+    if source and spell2 and target3 then
+        return true
+    end
+
+    -- "SPELL is absorbed by TARGET." (melee etc.)
+    local _, _, spell3, target4 = string.find(message, "^(.+) is absorbed by (.+)%.?$")
+    if spell3 and target4 then
+        -- Full absorb on the target — amount often unknown from this form alone
+        return true
+    end
+
+    return false
+end
+
+-- ============================================================
+-- Main parse loop
+-- ============================================================
+
+local function ParseEnemyDeath(message)
+    if not message then return false end
+    local name = nil
+    -- "You die."
+    if string.find(message, "^You die%.?$") or string.find(message, "^You have died%.?$") then
+        name = UnitName("player")
+    else
+        -- "Bob dies." / "Defias Pillager dies."
+        local _, _, n = string.find(message, "^(.+) dies%.?$")
+        name = n
+    end
+    if not name and UNITDIESOTHER then
+        local regex = sanitize(UNITDIESOTHER)
+        if regex then
+            local _, _, n = string.find(message, regex)
+            name = n
+        end
+    end
+    if not name then return false end
+
+    name = NormalizeName(name)
+    if OM.players[name] or name == UnitName("player") then
+        Parser:AddDeath(name, lastHitOn[name])
+        return true
+    end
+    -- Hostile / other NPC death for boss detection
+    if name ~= "You" and name ~= "you" then
+        NoteEnemyDeath(name)
+        return true
+    end
+    return false
+end
+
+local function ParseMessage(event, message)
+    if not message or message == "" then return end
+
+    -- Hostile deaths (unique-name boss detection)
+    if event == "CHAT_MSG_COMBAT_HOSTILE_DEATH"
+    or event == "CHAT_MSG_COMBAT_FRIENDLY_DEATH"
+    or string.find(string.lower(message), " dies", 1, true)
+    or string.find(string.lower(message), "you die", 1, true) then
+        if ParseEnemyDeath(message) then
+            return
+        end
+    end
+
+    -- Interrupts & dispels (checked early; messages are distinctive)
+    if ParseInterruptOrDispel(event, message) then
+        return
+    end
+
+    -- Hard CC applications / fades
+    if ParseHardCC(event, message) then
+        return
+    end
+
+    -- Plain-text reflection (before absorb-only, so "reflect ... (N absorbed)" is handled)
+    if ParseReflectMessage(message) then
+        return
+    end
+
+    -- Standalone absorb messages
+    if ParseAbsorbMessage(message) then
+        return
+    end
+
+    -- Aura gain/fade events (reflection + absorb shield tracking)
+    if event == "CHAT_MSG_SPELL_AURA_GONE_SELF"
+    or event == "CHAT_MSG_SPELL_AURA_GONE_OTHER"
+    or event == "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS"
+    or event == "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS"
+    or event == "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS"
+    or event == "CHAT_MSG_SPELL_SELF_BUFF"
+    or event == "CHAT_MSG_SPELL_PARTY_BUFF"
+    or event == "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF" then
+        ParseAuraMessage(event, message)
+        -- Continue: some of these events also carry heal patterns
+    end
+
+    -- Strip absorb trailer so damage amount is the portion that landed;
+    -- credit the absorbed portion separately
+    local absorbFromTrailer = nil
+    message, absorbFromTrailer = ExtractAbsorbTrailer(message)
+
+    local patterns = combatlog_events[event]
+    if not patterns then
+        -- Still credit trailer absorbs even if no damage pattern matched
+        if absorbFromTrailer and absorbFromTrailer > 0 then
+            -- Try to guess target from message context — often the player for self events
+            local absorbTarget = playerName
+            if event and string.find(event, "SELF", 1, true) then
+                absorbTarget = playerName
+            end
+            CreditAbsorb(absorbTarget, absorbFromTrailer, "Absorb")
+        end
+        return
+    end
+
+    for _, pattern in ipairs(patterns) do
+        local handler = combatlog_parser[pattern]
+        if handler then
+            local regex = sanitize(pattern)
+            if regex then
+                local found = string.find(message, regex)
+                if found then
+                    local _, _, c1, c2, c3, c4, c5 = string.find(message, regex)
+                    local source, spell, target, amount, school, dtype =
+                        handler(defaults, c1, c2, c3, c4, c5)
+
+                    amount = tonumber(amount)
+
+                    -- Absorb trailer: the unit who actually took the hit absorbed part of it.
+                    -- For normal damage/taken → target (or self).
+                    -- For reflection → the unit the damage was reflected *onto*.
+                    if absorbFromTrailer and absorbFromTrailer > 0 then
+                        local absTarget = nil
+                        if dtype == "reflect" then
+                            absTarget = target -- reflected damage absorbed by the attacker
+                        elseif dtype == "reflect_taken" then
+                            absTarget = target or playerName -- we absorbed their reflection
+                        elseif dtype == "taken" then
+                            absTarget = target or playerName
+                        elseif dtype == "damage" then
+                            absTarget = target
+                        end
+                        if absTarget then
+                            CreditAbsorb(absTarget, absorbFromTrailer, "Absorb")
+                        end
+                    end
+
+                    if amount and amount > 0 and source then
+                        if dtype == "damage" then
+                            local resolvedSource = ResolveSource(source)
+                            local tname = target and NormalizeName(target) or nil
+                            -- Self-inflicted (Bloodrage, Life Tap, etc.): taken only, not damage done
+                            local selfHarm = false
+                            if resolvedSource and tname and resolvedSource == tname then
+                                selfHarm = true
+                            end
+                            if not selfHarm then
+                                Parser:AddDamage(source, amount, spell, tname)
+                            end
+                            if tname and OM.players[tname] then
+                                local takenFrom = selfHarm and (spell or "Self") or source
+                                Parser:AddDamageTaken(tname, amount, takenFrom)
+                            elseif tname and not selfHarm then
+                                NoteEnemyHit(tname, amount)
+                            end
+                        elseif dtype == "heal" then
+                            Parser:AddHealing(source, amount, spell, false, target)
+                        elseif dtype == "taken" then
+                            Parser:AddDamageTaken(target or playerName, amount, source)
+                        elseif dtype == "reflect" then
+                            -- Credit the unit wearing the reflection buff (no caster reassignment)
+                            local spellName = spell or "Reflect"
+                            Parser:AddDamage(source, amount, spellName, target)
+                            if target and OM.players[NormalizeName(target)] then
+                                Parser:AddDamageTaken(target, amount, source)
+                            end
+                        elseif dtype == "reflect_taken" then
+                            Parser:AddDamageTaken(target or playerName, amount, source)
+                        end
+                    end
+                    return
+                end
+            end
+        end
+    end
+
+    -- Pattern miss but trailer present
+    if absorbFromTrailer and absorbFromTrailer > 0 then
+        CreditAbsorb(playerName, absorbFromTrailer, "Absorb")
+    end
+end
+
+-- ============================================================
+-- Event frame
+-- ============================================================
+
+local parseFrame = CreateFrame("Frame")
+
+function Parser:OnLoad()
+    playerName = UnitName("player")
+
+    for event, _ in pairs(combatlog_events) do
+        parseFrame:RegisterEvent(event)
+    end
+
+    -- Extra events: aura gain/fade, interrupts, dispels, hard CC
+    local extraEvents = {
+        -- Aura tracking (helpful + harmful)
+        "CHAT_MSG_SPELL_AURA_GONE_SELF",
+        "CHAT_MSG_SPELL_AURA_GONE_OTHER",
+        "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_CREATURE_BUFFS",
+        "CHAT_MSG_SPELL_SELF_BUFF",
+        "CHAT_MSG_SPELL_PARTY_BUFF",
+        "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF",
+        "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF",
+        "CHAT_MSG_SPELL_CREATURE_VS_SELF_BUFF",
+        "CHAT_MSG_SPELL_CREATURE_VS_PARTY_BUFF",
+        "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_BUFF",
+        "CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE",
+        -- Interrupts / dispels / aura breaks / CC applies
+        "CHAT_MSG_SPELL_BREAK_AURA",
+        "CHAT_MSG_SPELL_SELF_DAMAGE",
+        "CHAT_MSG_SPELL_PARTY_DAMAGE",
+        "CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_PET_DAMAGE",
+        "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF",
+        "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS",
+        -- Enemy deaths (unique name / pack detection)
+        "CHAT_MSG_COMBAT_HOSTILE_DEATH",
+    }
+    for _, ev in ipairs(extraEvents) do
+        parseFrame:RegisterEvent(ev)
+    end
+
+    -- Short window de-dupe so RAW_COMBATLOG + CHAT_MSG do not double-count
+    local recentLine = {}
+    local function ParseDeduped(evName, msg)
+        if not msg or msg == "" then return end
+        local now = GetTime()
+        local key = (evName or "") .. "|" .. msg
+        local last = recentLine[key]
+        if last and (now - last) < 0.1 then
+            return
+        end
+        recentLine[key] = now
+        -- Occasional cleanup
+        if math.mod(math.floor(now * 10), 50) == 0 then
+            local k, ts
+            for k, ts in pairs(recentLine) do
+                if (now - ts) > 1 then
+                    recentLine[k] = nil
+                end
+            end
+        end
+        ParseMessage(evName, msg)
+    end
+
+    parseFrame:SetScript("OnEvent", function()
+        if event == "RAW_COMBATLOG" then
+            -- SuperWoW path: arg1 = original event name, arg2 = text with GUIDs
+            if SuperWoWAvailable() and arg2 then
+                usingRawCombatLog = true
+                local cleaned = StripAndCacheGuids(arg2)
+                ParseDeduped(arg1, cleaned)
+            end
+            return
+        end
+        -- Always keep the normal combat log path. De-dupe handles overlap with RAW.
+        ParseDeduped(event, arg1)
+    end)
+
+    if SuperWoWAvailable() then
+        parseFrame:RegisterEvent("RAW_COMBATLOG")
+        -- Keep a GUID/name map warm for pets and roster
+        if not Parser._guidTicker then
+            local tick = CreateFrame("Frame")
+            local elapsed = 0
+            tick:SetScript("OnUpdate", function()
+                elapsed = elapsed + arg1
+                if elapsed >= 2 then
+                    elapsed = 0
+                    RefreshGuidCacheFromUnits()
+                end
+            end)
+            Parser._guidTicker = tick
+        end
+        RefreshGuidCacheFromUnits()
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r SuperWoW detected — using enhanced combat log path.")
+    end
+end
+
+function Parser:OnCombatStart()
+    Parser:FlushActiveCCs()
+    lastHitOn = {}
+    fightEnemies = {}
+    fightEnemyDeaths = {}
+    fightDuplicateNames = {}
+    fightIsBoss = false
+    fightBossName = nil
+    ClearDispelBuffers()
+    OM.data.current = {
+        players = {},
+        ccTargets = {},
+        startTime = GetTime(),
+        endTime = 0,
+        label = "Current",
+        isBoss = false,
+        duration = 0,
+    }
+end
+
+function Parser:OnCombatEnd(duration)
+    Parser:FlushActiveCCs()
+
+    local now = GetTime()
+    OM.data.current.endTime = now
+    local startT = OM.data.current.startTime or 0
+    duration = duration or ((startT > 0) and (now - startT) or 0)
+
+    -- Trim trailing idle time after the last damage/heal/action
+    local lastAct = OM.data.current.lastActivityTime
+    if startT > 0 and lastAct and lastAct >= startT and lastAct < now then
+        local trimmed = lastAct - startT
+        if trimmed > 0 and trimmed < duration then
+            duration = trimmed
+        end
+    end
+    if duration < 0 then duration = 0 end
+    OM.data.current.duration = duration
+
+    -- Update overall average DPS/HPS from this segment
+    if duration > 0 and OM.data.current.players then
+        local name, pdata
+        for name, pdata in pairs(OM.data.current.players) do
+            local o = EnsurePlayer(OM.data.overall, name)
+            if o then
+                local dmg = pdata.damage or 0
+                local heal = pdata.healing or 0
+                if dmg > 0 then
+                    o.dpsSum = (o.dpsSum or 0) + (dmg / duration)
+                    o.dpsSamples = (o.dpsSamples or 0) + 1
+                end
+                if heal > 0 then
+                    o.hpsSum = (o.hpsSum or 0) + (heal / duration)
+                    o.hpsSamples = (o.hpsSamples or 0) + 1
+                end
+            end
+        end
+        -- Track total active combat time for overall (sum of trimmed fights)
+        OM.data.overall.duration = (OM.data.overall.duration or 0) + duration
+        if not OM.data.overall.startTime or OM.data.overall.startTime == 0 then
+            OM.data.overall.startTime = startT
+        end
+        OM.data.overall.endTime = now
+    end
+
+    -- Final boss check on current target (must still be a unique name)
+    if UnitExists("target") and UnitLooksLikeBoss("target") then
+        local tname = UnitName("target")
+        if tname and IsUniqueEnemyName(tname) then
+            fightIsBoss = true
+            fightBossName = tname
+        end
+    end
+
+    -- If the flagged boss name was later revealed as a duplicate pack, clear it
+    if fightBossName and not IsUniqueEnemyName(fightBossName) then
+        fightIsBoss = false
+        fightBossName = nil
+    end
+
+    local label = PickFightLabel()
+    OM.data.current.label = label
+    OM.data.current.isBoss = fightIsBoss and true or false
+
+    -- Only store fights that had some activity
+    local hasData = false
+    for _, _ in pairs(OM.data.current.players) do
+        hasData = true
+        break
+    end
+
+    if hasData and duration >= 1 then
+        local snap = SnapshotSegment(OM.data.current)
+
+        -- Always keep last 2 fights (trash or boss)
+        PushFront(OM.data.recentFights, snap, MAX_RECENT_FIGHTS)
+
+        -- Additionally keep last 3 boss fights
+        if snap.isBoss then
+            PushFront(OM.data.bossFights, snap, MAX_BOSS_FIGHTS)
+        end
+    end
+end
+
+function Parser:OnReset()
+    Parser:FlushActiveCCs()
+    lastHitOn = {}
+    ClearDispelBuffers()
+    OM.data.current = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Current", isBoss = false, duration = 0 }
+    OM.data.overall = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Overall", isBoss = false, duration = 0 }
+    OM.data.recentFights = {}
+    OM.data.bossFights = {}
+    fightEnemies = {}
+    fightEnemyDeaths = {}
+    fightDuplicateNames = {}
+    fightIsBoss = false
+    fightBossName = nil
+    recentAbsorbCaster = {}
+    absorbAuras = {}
+end
+
+-- Resolve a UI segment key to a data table
+-- Keys: "current", "overall", "recent1", "recent2", "boss1", "boss2", "boss3"
+function Parser:GetSegment(key)
+    if not key or key == "current" then
+        return OM.data.current
+    elseif key == "overall" then
+        return OM.data.overall
+    end
+    local _, _, kind, idx = string.find(key, "^(%a+)(%d+)$")
+    idx = tonumber(idx)
+    if kind == "recent" and idx and OM.data.recentFights[idx] then
+        return OM.data.recentFights[idx]
+    end
+    if kind == "boss" and idx and OM.data.bossFights[idx] then
+        return OM.data.bossFights[idx]
+    end
+    return nil
+end
+
+function Parser:OnRosterUpdate()
+    playerName = UnitName("player")
+end
+
+-- ============================================================
+-- Register with Core
+-- ============================================================
+
+OM:RegisterModule("Parser", Parser)
