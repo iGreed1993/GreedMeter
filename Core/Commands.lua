@@ -199,4 +199,4 @@ function OM:LoadTestData()
     OM.data.bossFights = OM.data.bossFights or {}
 end
 
-DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter|r v1.0 loaded. Type /gdm")
+DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter|r v1.0.4 loaded. Type /gdm")

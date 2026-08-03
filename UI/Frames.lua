@@ -111,6 +111,78 @@ local function FitHeaderBtn(btn, label)
     btn:SetWidth(width)
 end
 
+-- First two letters of the first word (for compact header labels)
+local function TwoLetter(text)
+    if not text or text == "" then return "" end
+    local word = text
+    local _, _, w = string.find(text, "^(%S+)")
+    if w then word = w end
+    if string.len(word) <= 2 then return word end
+    return string.sub(word, 1, 2)
+end
+
+local function IsCompactHeader()
+    return OM.GetSetting and OM:GetSetting("hideTitle") == true
+end
+
+local function KeepTitleInCompact()
+    return OM.GetSetting and OM:GetSetting("keepTitleInCompact") == true
+end
+
+local function EffectiveFooterHeight()
+    -- Locked frames hide the resize grip; keep only a tight 2px bottom gap
+    if FramesLocked and FramesLocked() then
+        return 2
+    end
+    return FOOTER_HEIGHT or 10
+end
+
+-- Compact mode abbreviations when title is hidden
+local MODE_COMPACT = {
+    damage = "Da",
+    healing = "He",
+    dispels = "Di",
+    taken = "DT",
+    interrupts = "In",
+    cc = "CC",
+    ccbreak = "CCb",
+    deaths = "De",
+}
+
+local function ApplyHeaderButtonLabels(f)
+    if not f then return end
+    local compact = IsCompactHeader()
+    local keepTitle = compact and KeepTitleInCompact()
+
+    if f.resetLabel then
+        f.resetLabel:SetText(compact and "Re" or "Reset")
+    end
+    if f.announceLabel then
+        f.announceLabel:SetText(compact and "An" or "Announce")
+    end
+    if f.nameLabel then
+        f.nameLabel:SetText(compact and "Na" or "Name")
+    end
+    if f.modeLabel then
+        if compact and not keepTitle then
+            local mode = f.mode or "damage"
+            f.modeLabel:SetText(MODE_COMPACT[mode] or TwoLetter(MODE_LABELS[mode] or mode))
+        else
+            -- Normal header, or compact with title kept: always "Mode"
+            f.modeLabel:SetText("Mode")
+        end
+    end
+    if f.segLabel then
+        local full = UI:SegmentLabel(f.segment)
+        if compact then
+            f.segLabel:SetText(TwoLetter(full))
+        else
+            f.segLabel:SetText(full)
+        end
+    end
+    -- + / - stay as-is
+end
+
 local function FitAllHeaderBtns(f)
     if not f then return end
     FitHeaderBtn(f.nameBtn, f.nameLabel)
@@ -236,7 +308,13 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
         local newH = this.startH - dy
         if newW < MIN_FRAME_WIDTH then newW = MIN_FRAME_WIDTH end
         if newW > MAX_FRAME_WIDTH then newW = MAX_FRAME_WIDTH end
-        if newH < MIN_FRAME_HEIGHT then newH = MIN_FRAME_HEIGHT end
+        -- Min height: header + one bar + footer padding
+        local headerH = f.headerHeight or HEADER_HEIGHT
+        local barH = (GetBarHeight and GetBarHeight()) or 16
+        local footer = EffectiveFooterHeight()
+        local minH = headerH + barH + footer + 4
+        if minH < 40 then minH = 40 end
+        if newH < minH then newH = minH end
         if newH > MAX_FRAME_HEIGHT then newH = MAX_FRAME_HEIGHT end
         f:SetWidth(newW)
         f:SetHeight(newH)
@@ -358,15 +436,10 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
         end
         ShowDropdown(modeBtn, opts, function(value, label)
             f.mode = value
-            local compact = OM.GetSetting and OM:GetSetting("hideTitle") == true
-            if compact then
-                modeLabel:SetText(label)
-            else
-                modeLabel:SetText("Mode")
-                if f.title then
-                    f.title:SetText(label)
-                end
+            if f.title then
+                f.title:SetText(label)
             end
+            -- Labels (including compact abbreviations) refreshed in ApplyHeaderLayout
             UI:RefreshFrame(f)
             UI:SaveAllFrameLayouts()
         end)
@@ -616,72 +689,118 @@ end
 function UI:ApplyHeaderLayout(f, hideTitle, duration)
     if not f then return end
     -- duration arg kept for API compat; no longer shown in header
-    local headerH = hideTitle and 34 or HEADER_HEIGHT
+    local compact = hideTitle and true or false
+    local keepTitle = compact and KeepTitleInCompact()
+    local COMPACT_ROW = 20
+    local TITLE_ROW = 18
+    local headerH
+    if compact then
+        if keepTitle then
+            headerH = TITLE_ROW + COMPACT_ROW
+        else
+            headerH = COMPACT_ROW
+        end
+    else
+        headerH = HEADER_HEIGHT
+    end
 
     if f.durationLabel then
         f.durationLabel:Hide()
     end
 
+    ApplyHeaderButtonLabels(f)
+
     if f.title then
         local mode = f.mode or "damage"
         f.title:SetText(MODE_LABELS[mode] or mode)
-        if hideTitle then
+        if compact and not keepTitle then
             f.title:Hide()
         else
             f.title:Show()
         end
     end
 
-    -- Shared anchors
-    if f.resetBtn then
-        f.resetBtn:ClearAllPoints()
-        f.resetBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -3)
-        f.resetBtn:Show()
-    end
-    if f.segBtn then
-        f.segBtn:ClearAllPoints()
-        f.segBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -3)
-        if f.segLabel then f.segLabel:SetJustifyH("CENTER") end
-    end
-    if f.nameBtn then
-        f.nameBtn:ClearAllPoints()
-        f.nameBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -18)
-        if f.nameLabel then f.nameLabel:SetJustifyH("CENTER") end
-    end
-    if f.modeBtn then
-        f.modeBtn:ClearAllPoints()
-        f.modeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -18)
-        if f.modeLabel then
-            f.modeLabel:SetJustifyH("CENTER")
-            if hideTitle then
-                local mode = f.mode or "damage"
-                f.modeLabel:SetText(MODE_LABELS[mode] or mode)
-            else
-                f.modeLabel:SetText("Mode")
-            end
-        end
-    end
+    local footer = EffectiveFooterHeight()
 
-    if hideTitle then
-        -- Compact:
-        -- Row 1: Reset | Announce | Segment
-        -- Row 2: Name | + | Mode
+    if compact then
+        -- One control row (optionally under a title row)
+        local rowY = keepTitle and -(TITLE_ROW + 1) or -2
+
+        if keepTitle and f.title then
+            f.title:ClearAllPoints()
+            f.title:SetPoint("TOP", f, "TOP", 0, -2)
+            f.title:Show()
+        end
+
+        -- Left cluster: Re  An  +  Na
+        if f.resetBtn then
+            f.resetBtn:ClearAllPoints()
+            f.resetBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, rowY)
+            f.resetBtn:Show()
+        end
         if f.announceBtn then
             f.announceBtn:ClearAllPoints()
-            f.announceBtn:SetPoint("TOP", f, "TOP", 0, -3)
+            f.announceBtn:SetPoint("LEFT", f.resetBtn, "RIGHT", 3, 0)
             f.announceBtn:Show()
         end
         local midBtn = f.addBtn or f.removeBtn
         if midBtn then
             midBtn:ClearAllPoints()
-            midBtn:SetPoint("TOP", f, "TOP", 0, -18)
+            if f.announceBtn then
+                midBtn:SetPoint("LEFT", f.announceBtn, "RIGHT", 3, 0)
+            else
+                midBtn:SetPoint("LEFT", f.resetBtn, "RIGHT", 3, 0)
+            end
             midBtn:Show()
         end
-        if f.title then f.title:Hide() end
+        if f.nameBtn then
+            f.nameBtn:ClearAllPoints()
+            if midBtn then
+                f.nameBtn:SetPoint("LEFT", midBtn, "RIGHT", 3, 0)
+            else
+                f.nameBtn:SetPoint("LEFT", f.announceBtn or f.resetBtn, "RIGHT", 3, 0)
+            end
+            if f.nameLabel then f.nameLabel:SetJustifyH("CENTER") end
+        end
+
+        -- Right cluster: Se  Mo
+        if f.modeBtn then
+            f.modeBtn:ClearAllPoints()
+            f.modeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, rowY)
+            if f.modeLabel then f.modeLabel:SetJustifyH("CENTER") end
+        end
+        if f.segBtn then
+            f.segBtn:ClearAllPoints()
+            f.segBtn:SetPoint("RIGHT", f.modeBtn, "LEFT", -3, 0)
+            if f.segLabel then f.segLabel:SetJustifyH("CENTER") end
+        end
     else
-        -- Default:
+        -- Default two-row header
         -- Row 1: Reset | Title | Segment
         -- Row 2: Name | Announce | + | Mode
+        if f.resetBtn then
+            f.resetBtn:ClearAllPoints()
+            f.resetBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -3)
+            f.resetBtn:Show()
+        end
+        if f.segBtn then
+            f.segBtn:ClearAllPoints()
+            f.segBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -3)
+            if f.segLabel then f.segLabel:SetJustifyH("CENTER") end
+        end
+        if f.nameBtn then
+            f.nameBtn:ClearAllPoints()
+            f.nameBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -18)
+            if f.nameLabel then f.nameLabel:SetJustifyH("CENTER") end
+        end
+        if f.modeBtn then
+            f.modeBtn:ClearAllPoints()
+            f.modeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -18)
+            if f.modeLabel then
+                f.modeLabel:SetJustifyH("CENTER")
+                f.modeLabel:SetText("Mode")
+            end
+        end
         if f.title then
             f.title:ClearAllPoints()
             f.title:SetPoint("TOP", f, "TOP", 0, -4)
@@ -709,7 +828,16 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
     if f.barParent then
         f.barParent:ClearAllPoints()
         f.barParent:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -headerH)
-        f.barParent:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, FOOTER_HEIGHT)
+        f.barParent:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, footer)
+    end
+
+    -- Resize grip visibility follows lock
+    if f.resizeGrip then
+        if FramesLocked and FramesLocked() then
+            f.resizeGrip:Hide()
+        else
+            f.resizeGrip:Show()
+        end
     end
 
     f.headerHeight = headerH
@@ -723,7 +851,8 @@ function UI:LayoutBars(f)
     local width = (f:GetWidth() or 200) - 12
     if width < 40 then width = 40 end
     local headerH = f.headerHeight or HEADER_HEIGHT
-    local avail = f:GetHeight() - headerH - FOOTER_HEIGHT - 4
+    local footer = EffectiveFooterHeight()
+    local avail = f:GetHeight() - headerH - footer - 4
     if avail < barH then avail = barH end
     local fit = math.floor(avail / (barH + BAR_GAP))
     if fit < 1 then fit = 1 end
@@ -764,22 +893,10 @@ function UI:RefreshFrame(f)
     local segment = GetSegmentData(f.segment)
     local mode = f.mode or "damage"
 
-    local hideTitle = OM.GetSetting and OM:GetSetting("hideTitle") == true
-    if f.modeLabel then
-        if hideTitle then
-            -- Compact: no title, so mode button shows the active mode name
-            f.modeLabel:SetText(MODE_LABELS[mode] or mode)
-        else
-            f.modeLabel:SetText("Mode")
-        end
-    end
-    if f.title and not hideTitle then
+    -- Title / compact abbreviations applied in ApplyHeaderLayout
+    if f.title then
         f.title:SetText(MODE_LABELS[mode] or mode)
     end
-    if f.segLabel then
-        f.segLabel:SetText(self:SegmentLabel(f.segment))
-    end
-    FitAllHeaderBtns(f)
 
     local list = BuildSortedList(segment, mode, f.hiddenNames)
 
@@ -987,9 +1104,12 @@ function UI:ApplySettingsToFrames()
     local _, f
     for _, f in ipairs(self.frames) do
         f:SetAlpha(opacity)
-        self:LayoutBars(f)
         if f:IsShown() then
             self:RefreshFrame(f)
+        else
+            -- Still update layout/grip when hidden
+            local hideTitle = OM.GetSetting and OM:GetSetting("hideTitle") == true
+            self:ApplyHeaderLayout(f, hideTitle, 0)
         end
     end
 end

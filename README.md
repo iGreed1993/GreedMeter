@@ -32,9 +32,6 @@ GreedMeter tracks damage, healing, dispels, interrupts, hard CCs, CC breaks, dam
 | `/gdm test` | Load fake 40-player raid data for UI testing |
 | `/gdm help` | Show this help |
 
-![GreedMeter](ScreenShots/GreedMeterSettings.png)
-![GreedMeter](ScreenShots/GreedMeter.png)
-
 ### Installation
 
 1. Place the `GreedMeter` folder into your `Interface/AddOns` directory.

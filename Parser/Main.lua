@@ -1027,6 +1027,36 @@ function Parser:AddCCBreak(breaker, ccSpell, target)
     end
 end
 
+
+function Parser:AddDeath(name, lastHit)
+    name = NormalizeName(name)
+    if not name then return end
+    if not OM.players[name] and name ~= (playerName or UnitName("player")) then
+        return
+    end
+
+    local killer, spell, amount = "?", "?", 0
+    if type(lastHit) == "table" then
+        killer = lastHit.source or lastHit.killer or "?"
+        spell = lastHit.spell or "?"
+        amount = tonumber(lastHit.amount) or 0
+    end
+
+    local function apply(seg)
+        local p = EnsurePlayer(seg, name)
+        if not p then return end
+        p.deaths.count = (p.deaths.count or 0) + 1
+        if not p.deaths.list then p.deaths.list = {} end
+        table.insert(p.deaths.list, {
+            killer = killer,
+            spell = spell,
+            amount = amount,
+        })
+    end
+    apply(OM.data.current)
+    apply(OM.data.overall)
+end
+
 -- ============================================================
 -- Pattern sanitization (locale-independent)
 -- Converts global strings like COMBATHITSELFOTHER into matchable patterns
@@ -1570,9 +1600,87 @@ end
 -- Dispel matching: combat log order is unreliable. The fade line can appear
 -- before or after "X casts Purify". Keep short buffers of both and pair the
 -- closest fade to each cast (prefer same target when known).
-local PENDING_DISPEL_WINDOW = 1.5
+-- Direct "X removes Y from Z" lines always win and suppress nearby fade pairing.
+local PENDING_DISPEL_WINDOW = 0.5
 local recentDispelFades = {}  -- { { spell, target, time }, ... }
 local pendingDispelCasts = {} -- { { caster, target, time }, ... }
+local lastDispelCastKey = nil -- "caster|spell" for de-dupe
+local lastDispelCastTime = 0
+local directDispelSuppressUntil = 0 -- ignore fade pairing briefly after a direct remove
+
+-- Friendly/beneficial auras that should never be credited via cast↔fade pairing
+local FRIENDLY_AURAS = {
+    ["Power Word: Fortitude"] = true,
+    ["Prayer of Fortitude"] = true,
+    ["Mark of the Wild"] = true,
+    ["Gift of the Wild"] = true,
+    ["Arcane Intellect"] = true,
+    ["Arcane Brilliance"] = true,
+    ["Divine Spirit"] = true,
+    ["Prayer of Spirit"] = true,
+    ["Shadow Protection"] = true,
+    ["Prayer of Shadow Protection"] = true,
+    ["Thorns"] = true,
+    ["Blessing of Kings"] = true,
+    ["Blessing of Might"] = true,
+    ["Blessing of Wisdom"] = true,
+    ["Blessing of Salvation"] = true,
+    ["Blessing of Light"] = true,
+    ["Blessing of Sanctuary"] = true,
+    ["Blessing of Protection"] = true,
+    ["Blessing of Freedom"] = true,
+    ["Blessing of Sacrifice"] = true,
+    ["Greater Blessing of Kings"] = true,
+    ["Greater Blessing of Might"] = true,
+    ["Greater Blessing of Wisdom"] = true,
+    ["Greater Blessing of Salvation"] = true,
+    ["Greater Blessing of Light"] = true,
+    ["Greater Blessing of Sanctuary"] = true,
+    ["Battle Shout"] = true,
+    ["Trueshot Aura"] = true,
+    ["Power Word: Shield"] = true,
+    ["Ice Barrier"] = true,
+    ["Mana Shield"] = true,
+    ["Divine Shield"] = true,
+    ["Blessing of Protection"] = true,
+    ["Hand of Protection"] = true,
+    ["Abolish Disease"] = true,
+    ["Abolish Poison"] = true,
+    ["Renew"] = true,
+    ["Rejuvenation"] = true,
+    ["Regrowth"] = true,
+    ["Hot Streak"] = true,
+    ["Focus"] = true,
+    ["Inner Fire"] = true,
+    ["Dampen Magic"] = true,
+    ["Amplify Magic"] = true,
+    ["Detect Invisibility"] = true,
+    ["Detect Lesser Invisibility"] = true,
+    ["Unending Breath"] = true,
+    ["Water Breathing"] = true,
+    ["Water Walking"] = true,
+    ["Levitate"] = true,
+    ["Blood Pact"] = true,
+    ["Soulstone Resurrection"] = true,
+    ["Fear Ward"] = true,
+}
+
+local function IsFriendlyAura(spell)
+    if not spell then return false end
+    if FRIENDLY_AURAS[spell] then return true end
+    local lower = string.lower(spell)
+    -- Broad beneficial patterns
+    if string.find(lower, "blessing of", 1, true) then return true end
+    if string.find(lower, "greater blessing", 1, true) then return true end
+    if string.find(lower, "prayer of", 1, true) then return true end
+    if string.find(lower, "gift of", 1, true) then return true end
+    if string.find(lower, "mark of the wild", 1, true) then return true end
+    if string.find(lower, "arcane intellect", 1, true) then return true end
+    if string.find(lower, "arcane brilliance", 1, true) then return true end
+    if string.find(lower, "power word:", 1, true) then return true end
+    if string.find(lower, "fortitude", 1, true) then return true end
+    return false
+end
 
 local function PruneDispelBuffers(now)
     now = now or GetTime()
@@ -1592,6 +1700,14 @@ end
 local function ClearDispelBuffers()
     recentDispelFades = {}
     pendingDispelCasts = {}
+    lastDispelCastKey = nil
+    lastDispelCastTime = 0
+end
+
+-- After a definitive "X removes Y from Z", ignore nearby fades so they don't double-count
+local function SuppressFadePairing()
+    ClearDispelBuffers()
+    directDispelSuppressUntil = GetTime() + PENDING_DISPEL_WINDOW
 end
 
 -- Score a fade/cast pair; lower is better. nil = out of window.
@@ -1599,31 +1715,41 @@ local function DispelPairScore(castTime, castTarget, fadeTime, fadeTarget)
     local dist = castTime - fadeTime
     if dist < 0 then dist = -dist end
     if dist > PENDING_DISPEL_WINDOW then return nil end
-    -- Prefer same target when both sides known
     local ct = castTarget and NormalizeName(castTarget) or nil
     local ft = fadeTarget and NormalizeName(fadeTarget) or nil
     if ct and ft and ct == ft then
-        return dist - 0.5
+        return dist - 0.25
     end
     return dist
 end
 
-local function NoteDispelCast(caster, target)
+local function NoteDispelCast(caster, target, spellName)
     caster = ResolveSource(caster)
     if not caster then return end
     if not IsTracked(caster) and not OM.players[caster] then return end
     target = target and NormalizeName(target) or nil
     local now = GetTime()
+
+    -- Combat log sometimes double-prints the same cast with nothing in between
+    local key = tostring(caster) .. "|" .. tostring(spellName or "")
+    if lastDispelCastKey == key and (now - lastDispelCastTime) < PENDING_DISPEL_WINDOW then
+        return
+    end
+    lastDispelCastKey = key
+    lastDispelCastTime = now
+
     PruneDispelBuffers(now)
 
     -- Match the closest buffered fade (may have arrived before the cast line)
     local bestIdx, bestScore = nil, nil
     local i, fade
     for i, fade in ipairs(recentDispelFades) do
-        local score = DispelPairScore(now, target, fade.time, fade.target)
-        if score and (not bestScore or score < bestScore) then
-            bestScore = score
-            bestIdx = i
+        if not IsFriendlyAura(fade.spell) then
+            local score = DispelPairScore(now, target, fade.time, fade.target)
+            if score and (not bestScore or score < bestScore) then
+                bestScore = score
+                bestIdx = i
+            end
         end
     end
     if bestIdx then
@@ -1633,7 +1759,6 @@ local function NoteDispelCast(caster, target)
         return
     end
 
-    -- No nearby fade yet — wait for one
     table.insert(pendingDispelCasts, {
         caster = caster,
         target = target,
@@ -1642,12 +1767,21 @@ local function NoteDispelCast(caster, target)
 end
 
 local function TryCreditPendingDispel(fadedSpell, target)
+    -- Direct removes already credited — ignore nearby fades
+    if GetTime() < (directDispelSuppressUntil or 0) then
+        return false
+    end
+
     fadedSpell = fadedSpell or "Unknown"
+    -- Never credit friendly/beneficial auras via fade pairing
+    if IsFriendlyAura(fadedSpell) then
+        return false
+    end
+
     target = target and NormalizeName(target) or nil
     local now = GetTime()
     PruneDispelBuffers(now)
 
-    -- Match the closest pending cast (cast may have arrived before the fade)
     local bestIdx, bestScore = nil, nil
     local i, cast
     for i, cast in ipairs(pendingDispelCasts) do
@@ -1664,7 +1798,6 @@ local function TryCreditPendingDispel(fadedSpell, target)
         return true
     end
 
-    -- No nearby cast yet — buffer the fade for a later cast line
     table.insert(recentDispelFades, {
         spell = fadedSpell,
         target = target,
@@ -1743,32 +1876,32 @@ local function ParseDispelMessage(message)
     -- "You cast SPELL on TARGET." / "You cast SPELL."
     local _, _, castSpell, castTarget = string.find(message, "^You cast (.+) on (.+)%.?$")
     if castSpell and IsDispelSpell(castSpell) then
-        NoteDispelCast(playerName, castTarget)
+        NoteDispelCast(playerName, castTarget, castSpell)
         return true
     end
     local _, _, castSpellOnly = string.find(message, "^You cast (.+)%.?$")
     if castSpellOnly and IsDispelSpell(castSpellOnly) then
-        NoteDispelCast(playerName, nil)
+        NoteDispelCast(playerName, nil, castSpellOnly)
         return true
     end
     -- "SOURCE casts SPELL on TARGET." / "SOURCE casts SPELL."
     local _, _, castSrc, castSpell2, castTarget2 = string.find(message, "^(.+) casts (.+) on (.+)%.?$")
     if castSrc and castSpell2 and IsDispelSpell(castSpell2) then
         if castSrc ~= "You" and not string.find(castSrc, "^Your ") then
-            NoteDispelCast(castSrc, castTarget2)
+            NoteDispelCast(castSrc, castTarget2, castSpell2)
             return true
         end
     end
     local _, _, castSrc2, castSpell3 = string.find(message, "^(.+) casts (.+)%.?$")
     if castSrc2 and castSpell3 and IsDispelSpell(castSpell3) then
         if castSrc2 ~= "You" and not string.find(castSrc2, "^Your ") then
-            NoteDispelCast(castSrc2, nil)
+            NoteDispelCast(castSrc2, nil, castSpell3)
             return true
         end
     end
     local _, _, yourSpell = string.find(message, "^Your (.+) is cast%.?$")
     if yourSpell and IsDispelSpell(yourSpell) then
-        NoteDispelCast(playerName, nil)
+        NoteDispelCast(playerName, nil, yourSpell)
         return true
     end
 
@@ -1777,6 +1910,7 @@ local function ParseDispelMessage(message)
     local _, _, removed, target = string.find(message, "^You remove (.+) from (.+)%.?$")
     if removed and target then
         Parser:AddDispel(playerName, removed, target)
+        SuppressFadePairing()
         return true
     end
 
@@ -1785,7 +1919,7 @@ local function ParseDispelMessage(message)
     if action and target2 then
         local al = string.lower(action)
         if al == "purify" or al == "cleanse" or al == "cure" or al == "purge" then
-            NoteDispelCast(playerName)
+            NoteDispelCast(playerName, target2, action)
             return true
         end
     end
@@ -1796,6 +1930,7 @@ local function ParseDispelMessage(message)
     if source and sourceSpell and removed2 and target3 then
         if IsDispelSpell(sourceSpell) then
             Parser:AddDispel(source, removed2, target3)
+            SuppressFadePairing()
             return true
         end
     end
@@ -1805,6 +1940,7 @@ local function ParseDispelMessage(message)
     if source2 and removed3 and target4 then
         if source2 ~= "You" and not string.find(source2, "^Your ") then
             Parser:AddDispel(source2, removed3, target4)
+            SuppressFadePairing()
             return true
         end
     end

@@ -169,7 +169,7 @@ function UI:CreateSettingsFrame()
 
     local f = CreateFrame("Frame", "GreedMeterSettings", UIParent)
     f:SetWidth(460)
-    f:SetHeight(470)
+    f:SetHeight(490)
     f:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
     f:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -230,8 +230,26 @@ function UI:CreateSettingsFrame()
     y = y - 24
     AddCheckbox(f, "Show total bar", 16, y, "showTotal", "Add a Total row summing all players")
     y = y - 24
-    AddCheckbox(f, "Hide title (compact header)", 16, y, "hideTitle",
-        "Hide the GreedMeter title and use a tighter two-row header")
+    local compactCb = AddCheckbox(f, "Compact Header", 16, y, "hideTitle",
+        "One-line header with abbreviated button labels (Re, An, Na, Mo, ...)")
+    y = y - 22
+    local keepTitleCb = AddCheckbox(f, "Keep Title in compact", 36, y, "keepTitleInCompact",
+        "Show the mode title above the compact one-line controls. Mode button stays labeled Mode.", 18)
+    f.keepTitleCb = keepTitleCb
+    local function SyncKeepTitleEnabled()
+        local parentOn = OM:GetSetting("hideTitle") == true
+        if parentOn then
+            keepTitleCb:Enable()
+            if keepTitleCb.label then keepTitleCb.label:SetTextColor(1, 1, 1) end
+        else
+            keepTitleCb:Disable()
+            if keepTitleCb.label then keepTitleCb.label:SetTextColor(0.5, 0.5, 0.5) end
+        end
+    end
+    compactCb.onToggle = function(checked)
+        SyncKeepTitleEnabled()
+    end
+    SyncKeepTitleEnabled()
     y = y - 24
     local testCb = AddCheckbox(f, "Test mode", 16, y, "testMode",
         "Fill the meter with fake 40-player raid data. Uncheck to clear it.")
@@ -559,8 +577,12 @@ function UI:OnReset()
         f.scrollOffset = 0
         f.maxScroll = 0
         f.hiddenNames = {}
-        f.segment = "current"
-        if f.segLabel then f.segLabel:SetText("Current") end
+        -- Keep Current / Overall selection; only drop recent/boss segments
+        -- (those fight entries were wiped with the data).
+        local seg = f.segment or "current"
+        if seg ~= "current" and seg ~= "overall" then
+            f.segment = "current"
+        end
         -- Clear bar state so nothing stale remains
         if f.bars then
             local i, bar
