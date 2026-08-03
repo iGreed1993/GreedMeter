@@ -130,9 +130,9 @@ local function KeepTitleInCompact()
 end
 
 local function EffectiveFooterHeight()
-    -- Locked frames hide the resize grip; keep only a tight 2px bottom gap
+    -- Locked frames hide the resize grip; keep only a tight 1px bottom gap
     if FramesLocked and FramesLocked() then
-        return 2
+        return 1
     end
     return FOOTER_HEIGHT or 10
 end
@@ -148,6 +148,49 @@ local MODE_COMPACT = {
     ccbreak = "CCb",
     deaths = "De",
 }
+
+-- Mode tint colors for header button glow (r, g, b)
+local MODE_BTN_COLORS = {
+    damage     = { 1.00, 0.55, 0.10 }, -- Orange
+    healing    = { 0.20, 0.85, 0.30 }, -- Green
+    interrupts = { 1.00, 0.90, 0.20 }, -- Yellow
+    dispels    = { 1.00, 0.40, 0.75 }, -- Pink
+    cc         = { 0.30, 0.55, 1.00 }, -- Blue
+    ccbreak    = { 0.70, 0.35, 0.95 }, -- Purple
+    deaths     = { 0.95, 0.20, 0.20 }, -- Red
+    taken      = { 0.15, 0.85, 0.85 }, -- Cyan (damage taken)
+}
+
+local DEFAULT_BTN_BG = { 0.15, 0.15, 0.15, 0.75 }
+local DEFAULT_BTN_BORDER = { 0.55, 0.55, 0.55, 1 }
+
+local function ApplyHeaderButtonColors(f)
+    if not f then return end
+    local enabled = OM.GetSetting and OM:GetSetting("buttonsColorWithMode") == true
+    local mode = f.mode or "damage"
+    local col = MODE_BTN_COLORS[mode]
+
+    local function tint(btn)
+        if not btn then return end
+        if enabled and col then
+            -- Soft fill + stronger border reads as a colored glow behind the label
+            btn:SetBackdropColor(col[1], col[2], col[3], 0.40)
+            btn:SetBackdropBorderColor(col[1], col[2], col[3], 0.95)
+        else
+            btn:SetBackdropColor(DEFAULT_BTN_BG[1], DEFAULT_BTN_BG[2], DEFAULT_BTN_BG[3], DEFAULT_BTN_BG[4])
+            btn:SetBackdropBorderColor(DEFAULT_BTN_BORDER[1], DEFAULT_BTN_BORDER[2], DEFAULT_BTN_BORDER[3], DEFAULT_BTN_BORDER[4])
+        end
+    end
+
+    -- All header controls take the mode glow
+    tint(f.resetBtn)
+    tint(f.nameBtn)
+    tint(f.announceBtn)
+    tint(f.addBtn)
+    tint(f.removeBtn)
+    tint(f.segBtn)
+    tint(f.modeBtn)
+end
 
 local function ApplyHeaderButtonLabels(f)
     if not f then return end
@@ -824,6 +867,7 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
     end
 
     FitAllHeaderBtns(f)
+    ApplyHeaderButtonColors(f)
 
     if f.barParent then
         f.barParent:ClearAllPoints()
@@ -1034,7 +1078,12 @@ function UI:RefreshFrame(f)
             bar:Show()
             bar:SetValue(pct)
             if entry.isTotal then
-                bar:SetStatusBarColor(0.9, 0.9, 0.9, 0.85)
+                local modeCol = MODE_BTN_COLORS[mode]
+                if OM.GetSetting and OM:GetSetting("buttonsColorWithMode") == true and modeCol then
+                    bar:SetStatusBarColor(modeCol[1], modeCol[2], modeCol[3], 0.90)
+                else
+                    bar:SetStatusBarColor(0.9, 0.9, 0.9, 0.85)
+                end
                 if bar.classIcon then bar.classIcon:Hide() end
                 if bar.nameText then
                     bar.nameText:ClearAllPoints()

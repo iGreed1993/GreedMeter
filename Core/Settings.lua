@@ -9,6 +9,7 @@ local OM = GreedMeter
 OM.defaults = {
     classColors = true,
     showClassIcons = false,
+    buttonsColorWithMode = false, -- tint header buttons with the window's mode color
     barStyle = "Default",   -- status bar texture style
     barFont = "Friz",       -- bar text font
     barHeight = 16,

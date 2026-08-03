@@ -169,7 +169,7 @@ function UI:CreateSettingsFrame()
 
     local f = CreateFrame("Frame", "GreedMeterSettings", UIParent)
     f:SetWidth(460)
-    f:SetHeight(490)
+    f:SetHeight(510)
     f:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
     f:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -273,6 +273,9 @@ function UI:CreateSettingsFrame()
     y = y - 24
     AddCheckbox(f, "Show class icons", 16, y, "showClassIcons",
         "Show a class icon before each player name on the meter bars")
+    y = y - 24
+    AddCheckbox(f, "Mode Colors", 16, y, "buttonsColorWithMode",
+        "Change all buttons and Total bar to unique mode colors")
     y = y - 24
     AddCheckbox(f, "Merge pet damage", 16, y, "mergePetDamage",
         "Combine all pet ability damage into a single \"Pet: Damage\" entry on tooltips")
