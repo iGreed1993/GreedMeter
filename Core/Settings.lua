@@ -21,6 +21,7 @@ OM.defaults = {
     mergePetDamage = false, -- merge all pet ability damage into a single "Pet: Damage" entry
     announceChannel = "AUTO",
     announceLines = 5,
+    numberFormat = "100k", -- when to abbreviate: "1k", "10k", "100k", "never"
     superwowPromptShown = false, -- first-load SuperWoW popup
     minimapAngle = 220,
     testMode = false,

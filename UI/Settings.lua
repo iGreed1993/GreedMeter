@@ -488,6 +488,65 @@ function UI:CreateSettingsFrame()
     UIDropDownMenu_SetSelectedID(fdd, fsel)
     f.fontDropDown = fdd
 
+    -- Number format
+    ry = ry - 40
+    local numLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    numLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
+    numLabel:SetText("Number format:")
+    ry = ry - 20
+
+    local NUM_FORMATS = {
+        { key = "1k",    label = "1k" },
+        { key = "10k",   label = "10k" },
+        { key = "100k",  label = "100k" },
+        { key = "never", label = "Never" },
+    }
+
+    local function NumFormatDropDown_OnClick()
+        local id = this:GetID()
+        local entry = NUM_FORMATS[id]
+        if not entry then return end
+        OM:SetSetting("numberFormat", entry.key)
+        UIDropDownMenu_SetSelectedID(f.numFormatDropDown, id)
+        UIDropDownMenu_SetText(entry.label, f.numFormatDropDown)
+        if UI.ApplySettingsToFrames then
+            UI:ApplySettingsToFrames()
+        end
+        if UI.Refresh then
+            UI:Refresh()
+        end
+    end
+
+    local function NumFormatDropDown_Init()
+        local cur = OM:GetSetting("numberFormat") or "100k"
+        local i
+        for i = 1, table.getn(NUM_FORMATS) do
+            local info = {}
+            info.text = NUM_FORMATS[i].label
+            info.func = NumFormatDropDown_OnClick
+            info.checked = (NUM_FORMATS[i].key == cur)
+            UIDropDownMenu_AddButton(info)
+        end
+    end
+
+    local ndd = CreateFrame("Frame", "GreedMeterNumFormatDropDown", f, "UIDropDownMenuTemplate")
+    ndd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
+    UIDropDownMenu_Initialize(ndd, NumFormatDropDown_Init)
+    UIDropDownMenu_SetWidth(120, ndd)
+    UIDropDownMenu_SetButtonWidth(120, ndd)
+    local ncur = OM:GetSetting("numberFormat") or "100k"
+    local nsel = 3
+    local ni
+    for ni = 1, table.getn(NUM_FORMATS) do
+        if NUM_FORMATS[ni].key == ncur then
+            nsel = ni
+            UIDropDownMenu_SetText(NUM_FORMATS[ni].label, ndd)
+            break
+        end
+    end
+    UIDropDownMenu_SetSelectedID(ndd, nsel)
+    f.numFormatDropDown = ndd
+
     -- Sliders below the checkbox column
     AddSlider(f, "Bar height", 16, y, "barHeight", 10, 28, 1, 200)
     y = y - 36

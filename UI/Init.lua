@@ -139,15 +139,52 @@ local function FramesLocked()
     return OM.GetSetting and OM:GetSetting("lockFrames") == true
 end
 
+-- Insert commas for integer display (e.g. 1234567 → "1,234,567")
+local function CommaNumber(n)
+    n = math.floor((tonumber(n) or 0) + 0.5)
+    if n < 0 then
+        return "-" .. CommaNumber(-n)
+    end
+    local s = tostring(n)
+    if string.len(s) <= 3 then
+        return s
+    end
+    local out = ""
+    while string.len(s) > 3 do
+        out = "," .. string.sub(s, -3) .. out
+        s = string.sub(s, 1, -4)
+    end
+    return s .. out
+end
+
 local function FormatNumber(n)
     n = tonumber(n) or 0
+    local fmt = "100k"
+    if OM.GetSetting then
+        fmt = OM:GetSetting("numberFormat") or "100k"
+    end
+
+    -- Full numbers with thousands separators, no k/M abbreviation
+    if fmt == "never" then
+        return CommaNumber(n)
+    end
+
+    local threshold = 100000
+    if fmt == "1k" then
+        threshold = 1000
+    elseif fmt == "10k" then
+        threshold = 10000
+    elseif fmt == "100k" then
+        threshold = 100000
+    end
+
     if n >= 1000000 then
-        return string.format("%.1fM", n / 1000000)
-    elseif n >= 100000 then
-        -- Only abbreviate at 100k+
+        return string.format("%.2fM", n / 1000000)
+    elseif n >= threshold then
         return string.format("%.1fk", n / 1000)
     end
-    return tostring(math.floor(n + 0.5))
+    -- Below threshold: full number with commas when long enough (4+ digits)
+    return CommaNumber(n)
 end
 
 local function CreateButton(parent, text, width, height, onClick)

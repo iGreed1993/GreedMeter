@@ -58,7 +58,6 @@ end
 -- ============================================================
 local guidToName = {}
 local nameToGuid = {}
-local usingRawCombatLog = false
 
 local function SuperWoWAvailable()
     if OM and OM.HasSuperWoW then
@@ -74,11 +73,6 @@ local function CacheGuid(name, guid)
     nameToGuid[name] = guid
 end
 
-local function NameFromGuid(guid)
-    if not guid then return nil end
-    if guidToName[guid] then return guidToName[guid] end
-    return nil
-end
 
 -- Strip SuperWoW GUID tokens from a combat log line while caching them
 -- Handles forms like: 0xF130..., player-..., and trailing GUID chunks
@@ -159,66 +153,38 @@ end
 
 local function EnsurePlayer(segment, name)
     if not name or name == "" then return nil end
-    if not segment.players[name] then
-        local class = nil
-        if OM.players and OM.players[name] then
-            class = OM.players[name].class
+    local p = segment.players[name]
+    if p then
+        -- Refresh class from roster when known
+        if OM.players and OM.players[name] and OM.players[name].class then
+            p.class = OM.players[name].class
         end
-        segment.players[name] = {
-            damage = 0,
-            healing = 0,       -- effective healing (raw - overheal) + absorbs
-            overhealing = 0,   -- wasted heal amount
-            rawHealing = 0,    -- full heal amount before overheal subtract
-            absorbs = 0,
-            damageTaken = 0,
-            dispels = { count = 0, list = {} },
-            interrupts = { count = 0, list = {} },
-            ccBreaks = { count = 0, list = {} },
-            deaths = { count = 0, list = {} },
-            damageTakenBy = {},
-            damageTo = {},     -- [targetName] = amount
-            healingTo = {},    -- [targetName] = effective amount
-            damageSpells = {}, -- damage by spell name
-            healSpells = {},   -- healing by spell name
-            class = class,     -- stored so colors survive roster changes
-        }
+        return p
     end
-    -- Keep class updated if roster knows it
-    if OM.players and OM.players[name] and OM.players[name].class then
-        segment.players[name].class = OM.players[name].class
+    local class = nil
+    if OM.players and OM.players[name] then
+        class = OM.players[name].class
     end
-    -- Backfill if older structure
-    if not segment.players[name].overhealing then
-        segment.players[name].overhealing = 0
-    end
-    if not segment.players[name].rawHealing then
-        segment.players[name].rawHealing = segment.players[name].healing or 0
-    end
-    if not segment.players[name].damageTo then
-        segment.players[name].damageTo = {}
-    end
-    if not segment.players[name].healingTo then
-        segment.players[name].healingTo = {}
-    end
-    if not segment.players[name].damageSpells then
-        segment.players[name].damageSpells = {}
-    end
-    if not segment.players[name].healSpells then
-        segment.players[name].healSpells = {}
-    end
-    if not segment.players[name].ccBreaks then
-        segment.players[name].ccBreaks = { count = 0, list = {} }
-    end
-    if not segment.players[name].deaths then
-        segment.players[name].deaths = { count = 0, list = {} }
-    end
-    if not segment.players[name].dispels then
-        segment.players[name].dispels = { count = 0, list = {} }
-    end
-    if not segment.players[name].interrupts then
-        segment.players[name].interrupts = { count = 0, list = {} }
-    end
-    return segment.players[name]
+    p = {
+        damage = 0,
+        healing = 0,
+        overhealing = 0,
+        rawHealing = 0,
+        absorbs = 0,
+        damageTaken = 0,
+        dispels = { count = 0, list = {} },
+        interrupts = { count = 0, list = {} },
+        ccBreaks = { count = 0, list = {} },
+        deaths = { count = 0, list = {} },
+        damageTakenBy = {},
+        damageTo = {},
+        healingTo = {},
+        damageSpells = {},
+        healSpells = {},
+        class = class,
+    }
+    segment.players[name] = p
+    return p
 end
 
 -- Find a unit token for a player name (needed for health deficit / overheal)
@@ -1002,11 +968,6 @@ local function NoteBreakableCCDamage(target, source, spell)
     Parser:AddCCBreak(source, entry.spell, target)
 end
 Parser.NoteBreakableCCDamage = NoteBreakableCCDamage
-
--- Compatibility wrappers
-function Parser:AddCC(source, spell, target, maxDuration)
-    Parser:AddEnemyCC(spell, target, maxDuration)
-end
 
 function Parser:FinishCC(target, spell)
     target = NormalizeName(target)
@@ -2395,24 +2356,58 @@ local function CreditAbsorb(buffedUnit, amount, shieldName)
     end
 
     local applicator, spell = GetAbsorbApplicator(buffedUnit)
-    local label = shieldName or spell or "Absorb"
 
-    -- Prefer recent cast aimed at this unit
-    if (not applicator) and recentShieldByTarget and recentShieldByTarget[buffedUnit] then
+    -- Prefer recent cast aimed at this unit (name + caster)
+    if recentShieldByTarget and recentShieldByTarget[buffedUnit] then
         local entry = recentShieldByTarget[buffedUnit]
-        if entry and entry.caster and (GetTime() - (entry.time or 0)) <= RECENT_CASTER_TIMEOUT then
-            applicator = entry.caster
-            if entry.spell then label = entry.spell end
+        if entry and (GetTime() - (entry.time or 0)) <= RECENT_CASTER_TIMEOUT then
+            if entry.caster and not applicator then
+                applicator = entry.caster
+            end
+            if entry.spell and (not spell or spell == "") then
+                spell = entry.spell
+            end
         end
+    end
+
+    -- Resolve display name: never leave PW:S / Ice Barrier etc. as generic "Absorb"
+    local label = shieldName
+    if not label or label == "" or label == "Absorb" then
+        label = spell
+    end
+    if (not label or label == "" or label == "Absorb") and absorbAuras[buffedUnit] then
+        -- Prefer Power Word: Shield when present, else any active shield on the unit
+        if absorbAuras[buffedUnit]["Power Word: Shield"] then
+            label = "Power Word: Shield"
+            if not applicator then
+                applicator = absorbAuras[buffedUnit]["Power Word: Shield"]
+            end
+        else
+            local s, app
+            for s, app in pairs(absorbAuras[buffedUnit]) do
+                label = s
+                if not applicator then applicator = app end
+                break
+            end
+        end
+    end
+    if not label or label == "" then
+        label = "Absorb"
     end
 
     if not applicator then
         -- Power Word: Shield: single priest / clear healing-lead priest
-        if label == "Absorb" or label == "Power Word: Shield"
+        if label == "Power Word: Shield"
         or (spell and string.find(spell, "Power Word: Shield", 1, true))
-        or (shieldName and string.find(shieldName, "Power Word: Shield", 1, true)) then
-            applicator = ResolvePriestShieldApplicator()
-            if applicator then label = "Power Word: Shield" end
+        or (shieldName and string.find(shieldName, "Power Word: Shield", 1, true))
+        or label == "Absorb" then
+            local priest = ResolvePriestShieldApplicator()
+            if priest then
+                applicator = priest
+                if label == "Absorb" then
+                    label = "Power Word: Shield"
+                end
+            end
         end
     end
 
@@ -2620,41 +2615,73 @@ local function ParseMessage(event, message)
     -- Hostile deaths (unique-name boss detection)
     if event == "CHAT_MSG_COMBAT_HOSTILE_DEATH"
     or event == "CHAT_MSG_COMBAT_FRIENDLY_DEATH"
-    or string.find(string.lower(message), " dies", 1, true)
-    or string.find(string.lower(message), "you die", 1, true) then
+    or string.find(message, " dies", 1, true)
+    or string.find(message, "You die", 1, true)
+    or string.find(message, "you die", 1, true) then
         if ParseEnemyDeath(message) then
             return
         end
     end
 
-    -- Interrupts & dispels (checked early; messages are distinctive)
-    if ParseInterruptOrDispel(event, message) then
-        return
+    -- Cheap substring gates before heavier parsers (plain find is case-sensitive;
+    -- combat log verbs are consistently cased in English 1.12 clients).
+    -- Interrupts / dispels / fades
+    if string.find(message, "interrupt", 1, true)
+    or string.find(message, "Interrupt", 1, true)
+    or string.find(message, "cast", 1, true)
+    or string.find(message, "remove", 1, true)
+    or string.find(message, "fades from", 1, true)
+    or string.find(message, "Purify", 1, true)
+    or string.find(message, "Cleanse", 1, true)
+    or string.find(message, "Dispel", 1, true)
+    or string.find(message, "Purge", 1, true) then
+        if ParseInterruptOrDispel(event, message) then
+            return
+        end
     end
 
     -- Hard CC applications / fades
-    if ParseHardCC(event, message) then
-        return
+    if string.find(message, "afflicted by", 1, true)
+    or string.find(message, "fades from", 1, true)
+    or string.find(message, "is afflicted", 1, true) then
+        if ParseHardCC(event, message) then
+            return
+        end
     end
 
     -- HoT ticks: always credit the caster named in "from X's Spell"
-    if ParsePeriodicHealMessage(message) then
-        return
+    if string.find(message, "health from", 1, true)
+    or string.find(message, "hit points from", 1, true) then
+        if ParsePeriodicHealMessage(message) then
+            return
+        end
     end
 
     -- Track absorb-shield casts for later absorb credit
-    if ParseShieldCastMessage(message) then
-        return
+    if string.find(message, "cast", 1, true) and (
+        string.find(message, "Power Word: Shield", 1, true)
+        or string.find(message, "Ice Barrier", 1, true)
+        or string.find(message, "Mana Shield", 1, true)
+        or string.find(message, "Sacrifice", 1, true)
+        or string.find(message, "Ward", 1, true)
+    ) then
+        if ParseShieldCastMessage(message) then
+            return
+        end
     end
 
-    -- Plain-text reflection (before absorb-only, so "reflect ... (N absorbed)" is handled)
-    if ParseReflectMessage(message) then
-        return
+    -- Plain-text reflection
+    if string.find(message, "reflect", 1, true) or string.find(message, "Reflect", 1, true) then
+        if ParseReflectMessage(message) then
+            return
+        end
     end
 
     -- Standalone absorb messages
-    if ParseAbsorbMessage(message) then
-        return
+    if string.find(message, "absorb", 1, true) or string.find(message, "Absorb", 1, true) then
+        if ParseAbsorbMessage(message) then
+            return
+        end
     end
 
     -- Aura gain/fade events (reflection + absorb shield tracking)
@@ -2775,61 +2802,17 @@ local parseFrame = CreateFrame("Frame")
 function Parser:OnLoad()
     playerName = UnitName("player")
 
-    for event, _ in pairs(combatlog_events) do
-        parseFrame:RegisterEvent(event)
-    end
-
-    -- Extra events: aura gain/fade, interrupts, dispels, hard CC
-    local extraEvents = {
-        -- Aura tracking (helpful + harmful)
-        "CHAT_MSG_SPELL_AURA_GONE_SELF",
-        "CHAT_MSG_SPELL_AURA_GONE_OTHER",
-        "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
-        "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS",
-        "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS",
-        "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",
-        "CHAT_MSG_SPELL_PERIODIC_CREATURE_BUFFS",
-        "CHAT_MSG_SPELL_SELF_BUFF",
-        "CHAT_MSG_SPELL_PARTY_BUFF",
-        "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF",
-        "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF",
-        "CHAT_MSG_SPELL_CREATURE_VS_SELF_BUFF",
-        "CHAT_MSG_SPELL_CREATURE_VS_PARTY_BUFF",
-        "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_BUFF",
-        "CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE",
-        "CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE",
-        "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE",
-        "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",
-        "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE",
-        -- Interrupts / dispels / aura breaks / CC applies
-        "CHAT_MSG_SPELL_BREAK_AURA",
-        "CHAT_MSG_SPELL_SELF_DAMAGE",
-        "CHAT_MSG_SPELL_PARTY_DAMAGE",
-        "CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE",
-        "CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE",
-        "CHAT_MSG_SPELL_PET_DAMAGE",
-        "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF",
-        "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS",
-        -- Enemy deaths (unique name / pack detection)
-        "CHAT_MSG_COMBAT_HOSTILE_DEATH",
-    }
-    for _, ev in ipairs(extraEvents) do
-        parseFrame:RegisterEvent(ev)
-    end
-
-    -- Short window de-dupe so RAW_COMBATLOG + CHAT_MSG do not double-count
+    -- Short window de-dupe (safety net for any residual double delivery)
     local recentLine = {}
     local function ParseDeduped(evName, msg)
         if not msg or msg == "" then return end
         local now = GetTime()
-        local key = (evName or "") .. "|" .. msg
-        local last = recentLine[key]
-        if last and (now - last) < 0.1 then
+        local last = recentLine[msg]
+        if last and (now - last) < 0.15 then
             return
         end
-        recentLine[key] = now
-        -- Occasional cleanup
-        if math.mod(math.floor(now * 10), 50) == 0 then
+        recentLine[msg] = now
+        if math.mod(math.floor(now), 3) == 0 and math.mod(math.floor(now * 10), 10) == 0 then
             local k, ts
             for k, ts in pairs(recentLine) do
                 if (now - ts) > 1 then
@@ -2842,21 +2825,23 @@ function Parser:OnLoad()
 
     parseFrame:SetScript("OnEvent", function()
         if event == "RAW_COMBATLOG" then
-            -- SuperWoW path: arg1 = original event name, arg2 = text with GUIDs
-            if SuperWoWAvailable() and arg2 then
-                usingRawCombatLog = true
+            -- SuperWoW enhanced path: arg1 = original CHAT event name, arg2 = text + GUIDs
+            if arg2 then
                 local cleaned = StripAndCacheGuids(arg2)
                 ParseDeduped(arg1, cleaned)
             end
             return
         end
-        -- Always keep the normal combat log path. De-dupe handles overlap with RAW.
+        -- Standard Vanilla path (no SuperWoW)
         ParseDeduped(event, arg1)
     end)
 
     if SuperWoWAvailable() then
+        -- SuperWoW: use RAW_COMBATLOG only. Do NOT also register CHAT_MSG combat
+        -- events — that was the source of double counting when texts differed
+        -- slightly after GUID stripping.
         parseFrame:RegisterEvent("RAW_COMBATLOG")
-        -- Keep a GUID/name map warm for pets and roster
+
         if not Parser._guidTicker then
             local tick = CreateFrame("Frame")
             local elapsed = 0
@@ -2870,7 +2855,49 @@ function Parser:OnLoad()
             Parser._guidTicker = tick
         end
         RefreshGuidCacheFromUnits()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r SuperWoW detected — using enhanced combat log path.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r SuperWoW detected — RAW combat log path (no CHAT dual-parse).")
+    else
+        -- Standard 1.12 client: full CHAT_MSG combat log coverage for every mode
+        local ev
+        for ev, _ in pairs(combatlog_events) do
+            parseFrame:RegisterEvent(ev)
+        end
+
+        local extraEvents = {
+            "CHAT_MSG_SPELL_AURA_GONE_SELF",
+            "CHAT_MSG_SPELL_AURA_GONE_OTHER",
+            "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
+            "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS",
+            "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS",
+            "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",
+            "CHAT_MSG_SPELL_PERIODIC_CREATURE_BUFFS",
+            "CHAT_MSG_SPELL_SELF_BUFF",
+            "CHAT_MSG_SPELL_PARTY_BUFF",
+            "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF",
+            "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF",
+            "CHAT_MSG_SPELL_CREATURE_VS_SELF_BUFF",
+            "CHAT_MSG_SPELL_CREATURE_VS_PARTY_BUFF",
+            "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_BUFF",
+            "CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE",
+            "CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE",
+            "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE",
+            "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",
+            "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE",
+            "CHAT_MSG_SPELL_BREAK_AURA",
+            "CHAT_MSG_SPELL_SELF_DAMAGE",
+            "CHAT_MSG_SPELL_PARTY_DAMAGE",
+            "CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE",
+            "CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE",
+            "CHAT_MSG_SPELL_PET_DAMAGE",
+            "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF",
+            "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS",
+            "CHAT_MSG_COMBAT_HOSTILE_DEATH",
+            "CHAT_MSG_COMBAT_FRIENDLY_DEATH",
+        }
+        local i
+        for i = 1, table.getn(extraEvents) do
+            parseFrame:RegisterEvent(extraEvents[i])
+        end
     end
 end
 
