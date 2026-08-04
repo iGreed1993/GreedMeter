@@ -314,6 +314,8 @@ local ABSORB_SHIELDS = {
 local absorbAuras = {}
 -- recentAbsorbCaster[spellName] = { name = "Caster", time = GetTime() }
 local recentAbsorbCaster = {}
+-- recentShieldByTarget[targetName] = { caster = "Caster", spell = "...", time = GetTime() }
+local recentShieldByTarget = {}
 local RECENT_CASTER_TIMEOUT = 8
 
 local function IsAbsorbShield(spell)
@@ -325,12 +327,21 @@ local function IsAbsorbShield(spell)
     return false
 end
 
-local function NoteRecentAbsorbCaster(spell, caster)
+local function NoteRecentAbsorbCaster(spell, caster, target)
     if not spell or not caster or not IsAbsorbShield(spell) then return end
+    caster = NormalizeName(caster)
     recentAbsorbCaster[spell] = {
-        name = NormalizeName(caster),
+        name = caster,
         time = GetTime(),
     }
+    target = NormalizeName(target)
+    if target then
+        recentShieldByTarget[target] = {
+            caster = caster,
+            spell = spell,
+            time = GetTime(),
+        }
+    end
 end
 
 local function GetRecentAbsorbCaster(spell)
@@ -1430,6 +1441,51 @@ local combatlog_events = {
 -- Aura gain / fade parsing (reflection tracking)
 -- ============================================================
 
+-- Among group priests, pick a likely PW:S caster.
+-- 1 priest → that priest.
+-- Multiple → top healer by current healing if they lead the next priest by ≥15% share.
+-- Otherwise nil (caller falls back to the buffed unit).
+local function ResolvePriestShieldApplicator()
+    local priests = {}
+    local name, data
+    for name, data in pairs(OM.players or {}) do
+        if data and data.class == "PRIEST" then
+            table.insert(priests, name)
+        end
+    end
+    local n = table.getn(priests)
+    if n == 0 then return nil end
+    if n == 1 then return priests[1] end
+
+    local seg = OM.data and OM.data.current
+    local heals = {}
+    local total = 0
+    local i
+    for i = 1, n do
+        local pName = priests[i]
+        local h = 0
+        if seg and seg.players and seg.players[pName] then
+            h = seg.players[pName].healing or 0
+        end
+        heals[pName] = h
+        total = total + h
+    end
+    if total <= 0 then return nil end
+
+    table.sort(priests, function(a, b)
+        if heals[a] == heals[b] then return a < b end
+        return heals[a] > heals[b]
+    end)
+    local top = priests[1]
+    local second = priests[2]
+    local topShare = heals[top] / total
+    local secondShare = heals[second] / total
+    if (topShare - secondShare) >= 0.15 then
+        return top
+    end
+    return nil
+end
+
 local function HandleAuraGain(target, spell)
     target = NormalizeName(target)
     if not target or not spell then return end
@@ -1437,16 +1493,26 @@ local function HandleAuraGain(target, spell)
     -- Absorb shields only (reflection caster assignment removed)
     if IsAbsorbShield(spell) then
         local applicator = GetRecentAbsorbCaster(spell)
-        if not applicator and OM.players[target] then
-            local class = OM.players[target].class
-            if spell == "Power Word: Shield" and class == "PRIEST" then
-                applicator = target
-            elseif (spell == "Ice Barrier" or spell == "Mana Shield" or spell == "Frost Ward" or spell == "Fire Ward") and class == "MAGE" then
-                applicator = target
-            elseif spell == "Sacrifice" and class == "WARLOCK" then
-                applicator = target
+        -- Prefer a recent cast aimed at this specific target when available
+        if recentShieldByTarget and recentShieldByTarget[target] then
+            local entry = recentShieldByTarget[target]
+            if entry and entry.caster and (GetTime() - (entry.time or 0)) <= RECENT_CASTER_TIMEOUT then
+                applicator = entry.caster
             end
         end
+        if not applicator then
+            if spell == "Power Word: Shield" or string.find(spell, "Power Word: Shield", 1, true) then
+                applicator = ResolvePriestShieldApplicator()
+            elseif OM.players[target] then
+                local class = OM.players[target].class
+                if (spell == "Ice Barrier" or spell == "Mana Shield" or spell == "Frost Ward" or spell == "Fire Ward") and class == "MAGE" then
+                    applicator = target
+                elseif spell == "Sacrifice" and class == "WARLOCK" then
+                    applicator = target
+                end
+            end
+        end
+        -- Multiple close priests / unknown → credit the buffed unit
         applicator = applicator or target
         SetAbsorbAura(target, spell, applicator)
         if applicator then
@@ -2210,27 +2276,155 @@ local function ParseHardCC(event, message)
 end
 
 -- ============================================================
+-- Periodic (HoT) heal plain-text parser
+-- Combat log: "You gain N health from Caster's Spell."
+-- Always credit the *caster*, never the unit that gained the HP.
+-- ============================================================
+
+local function ParsePeriodicHealMessage(message)
+    if not message then return false end
+    local lower = string.lower(message)
+    if not string.find(lower, "health from", 1, true) and not string.find(lower, "hit points from", 1, true) then
+        return false
+    end
+
+    -- "You gain N health from your Spell."
+    local _, _, amt, spell = string.find(message, "^You gain (%d+) health from your (.+)%.?$")
+    if amt and spell then
+        Parser:AddHealing(playerName, tonumber(amt), spell, false, playerName)
+        return true
+    end
+    -- "You gain N health from Caster's Spell."
+    local _, _, amt2, caster, spell2 = string.find(message, "^You gain (%d+) health from (.+)'s (.+)%.?$")
+    if amt2 and caster and spell2 then
+        Parser:AddHealing(caster, tonumber(amt2), spell2, false, playerName)
+        return true
+    end
+    -- "Target gains N health from your Spell."
+    local _, _, target, amt3, spell3 = string.find(message, "^(.+) gains (%d+) health from your (.+)%.?$")
+    if target and amt3 and spell3 then
+        if target ~= "You" and not string.find(target, "^Your ") then
+            Parser:AddHealing(playerName, tonumber(amt3), spell3, false, target)
+            return true
+        end
+    end
+    -- "Target gains N health from Caster's Spell."
+    local _, _, target2, amt4, caster2, spell4 = string.find(message, "^(.+) gains (%d+) health from (.+)'s (.+)%.?$")
+    if target2 and amt4 and caster2 and spell4 then
+        if target2 ~= "You" and not string.find(target2, "^Your ") then
+            Parser:AddHealing(caster2, tonumber(amt4), spell4, false, target2)
+            return true
+        end
+    end
+    -- Variant: "hit points" instead of "health"
+    local _, _, amt5, caster3, spell5 = string.find(message, "^You gain (%d+) hit points from (.+)'s (.+)%.?$")
+    if amt5 and caster3 and spell5 then
+        Parser:AddHealing(caster3, tonumber(amt5), spell5, false, playerName)
+        return true
+    end
+    local _, _, target3, amt6, caster4, spell6 = string.find(message, "^(.+) gains (%d+) hit points from (.+)'s (.+)%.?$")
+    if target3 and amt6 and caster4 and spell6 then
+        if target3 ~= "You" and not string.find(target3, "^Your ") then
+            Parser:AddHealing(caster4, tonumber(amt6), spell6, false, target3)
+            return true
+        end
+    end
+    return false
+end
+
+-- ============================================================
+-- Absorb-shield cast tracking
+-- "Alice casts Power Word: Shield on Bob." → remember Alice for Bob's absorbs
+-- ============================================================
+
+local function ParseShieldCastMessage(message)
+    if not message then return false end
+    local lower = string.lower(message)
+    if not string.find(lower, "cast", 1, true) then return false end
+
+    -- "You cast SPELL on TARGET."
+    local _, _, spell, target = string.find(message, "^You cast (.+) on (.+)%.?$")
+    if spell and target and IsAbsorbShield(spell) then
+        NoteRecentAbsorbCaster(spell, playerName, target)
+        SetAbsorbAura(target, spell, playerName)
+        return true
+    end
+    -- "SOURCE casts SPELL on TARGET."
+    local _, _, source, spell2, target2 = string.find(message, "^(.+) casts (.+) on (.+)%.?$")
+    if source and spell2 and target2 and IsAbsorbShield(spell2) then
+        if source ~= "You" and not string.find(source, "^Your ") then
+            NoteRecentAbsorbCaster(spell2, source, target2)
+            SetAbsorbAura(target2, spell2, source)
+            return true
+        end
+    end
+    return false
+end
+
+-- ============================================================
 -- Absorb message parsing
 -- Credits absorbed damage as healing to the shield provider.
 -- ============================================================
+
+-- De-dupe absorb credits: the same absorb often arrives twice
+-- (hit line "(N absorbed)" trailer + standalone "X absorbs N damage",
+-- or RAW_COMBATLOG + CHAT_MSG). Collapse duplicates within a short window.
+local recentAbsorbCredits = {} -- [ "unit|amount" ] = GetTime()
+local ABSORB_DEDUPE_WINDOW = 0.2
 
 local function CreditAbsorb(buffedUnit, amount, shieldName)
     amount = tonumber(amount)
     if not amount or amount <= 0 then return end
     buffedUnit = NormalizeName(buffedUnit) or buffedUnit
 
-    local applicator, spell = GetAbsorbApplicator(buffedUnit)
-    local credit = applicator or buffedUnit
-    local label = shieldName or spell or "Absorb"
-
-    -- Class self-shield heuristics when applicator unknown
-    if not applicator and OM.players[buffedUnit] then
-        local class = OM.players[buffedUnit].class
-        if class == "PRIEST" or class == "MAGE" or class == "WARLOCK" then
-            credit = buffedUnit
+    local now = GetTime()
+    local dedupeKey = tostring(buffedUnit) .. "|" .. tostring(amount)
+    local last = recentAbsorbCredits[dedupeKey]
+    if last and (now - last) < ABSORB_DEDUPE_WINDOW then
+        return
+    end
+    recentAbsorbCredits[dedupeKey] = now
+    -- Occasional prune
+    if math.mod(math.floor(now * 5), 25) == 0 then
+        local k, ts
+        for k, ts in pairs(recentAbsorbCredits) do
+            if (now - ts) > 1 then
+                recentAbsorbCredits[k] = nil
+            end
         end
     end
 
+    local applicator, spell = GetAbsorbApplicator(buffedUnit)
+    local label = shieldName or spell or "Absorb"
+
+    -- Prefer recent cast aimed at this unit
+    if (not applicator) and recentShieldByTarget and recentShieldByTarget[buffedUnit] then
+        local entry = recentShieldByTarget[buffedUnit]
+        if entry and entry.caster and (GetTime() - (entry.time or 0)) <= RECENT_CASTER_TIMEOUT then
+            applicator = entry.caster
+            if entry.spell then label = entry.spell end
+        end
+    end
+
+    if not applicator then
+        -- Power Word: Shield: single priest / clear healing-lead priest
+        if label == "Absorb" or label == "Power Word: Shield"
+        or (spell and string.find(spell, "Power Word: Shield", 1, true))
+        or (shieldName and string.find(shieldName, "Power Word: Shield", 1, true)) then
+            applicator = ResolvePriestShieldApplicator()
+            if applicator then label = "Power Word: Shield" end
+        end
+    end
+
+    if not applicator and OM.players[buffedUnit] then
+        local class = OM.players[buffedUnit].class
+        -- Self-cast class shields when still unknown
+        if class == "PRIEST" or class == "MAGE" or class == "WARLOCK" then
+            applicator = buffedUnit
+        end
+    end
+
+    local credit = applicator or buffedUnit
     Parser:AddHealing(credit, amount, label, true)
 end
 
@@ -2440,6 +2634,16 @@ local function ParseMessage(event, message)
 
     -- Hard CC applications / fades
     if ParseHardCC(event, message) then
+        return
+    end
+
+    -- HoT ticks: always credit the caster named in "from X's Spell"
+    if ParsePeriodicHealMessage(message) then
+        return
+    end
+
+    -- Track absorb-shield casts for later absorb credit
+    if ParseShieldCastMessage(message) then
         return
     end
 
@@ -2788,6 +2992,8 @@ function Parser:OnReset()
     fightIsBoss = false
     fightBossName = nil
     recentAbsorbCaster = {}
+    recentShieldByTarget = {}
+    recentAbsorbCredits = {}
     absorbAuras = {}
 end
 
