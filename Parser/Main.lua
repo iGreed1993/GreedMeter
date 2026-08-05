@@ -1398,6 +1398,39 @@ local combatlog_events = {
     ["CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS"]  = combatlog_strings["Periodic Heal"],
 }
 
+-- Flat fallback pattern list when event name is unknown (SuperWoW RAW arg1 quirks)
+local FALLBACK_COMBAT_PATTERNS = {}
+do
+    local seen = {}
+    local groups = {
+        "Hit Damage (self vs. other)",
+        "Hit Damage (other vs. self)",
+        "Hit Damage (other vs. other)",
+        "Spell Damage (self)",
+        "Spell Damage (other vs. self)",
+        "Spell Damage (other vs. other)",
+        "Periodic Damage",
+        "Heal (self)",
+        "Heal (other)",
+        "Periodic Heal",
+        "Shield Damage",
+    }
+    local gi, gname, pi, pat
+    for gi = 1, table.getn(groups) do
+        gname = groups[gi]
+        local list = combatlog_strings[gname]
+        if list then
+            for pi = 1, table.getn(list) do
+                pat = list[pi]
+                if pat and not seen[pat] then
+                    seen[pat] = true
+                    table.insert(FALLBACK_COMBAT_PATTERNS, pat)
+                end
+            end
+        end
+    end
+end
+
 -- ============================================================
 -- Aura gain / fade parsing (reflection tracking)
 -- ============================================================
@@ -2704,9 +2737,11 @@ local function ParseMessage(event, message)
 
     local patterns = combatlog_events[event]
     if not patterns then
-        -- Still credit trailer absorbs even if no damage pattern matched
+        -- Unknown / SuperWoW event name: still try the full combat pattern set
+        patterns = FALLBACK_COMBAT_PATTERNS
+    end
+    if not patterns or table.getn(patterns) == 0 then
         if absorbFromTrailer and absorbFromTrailer > 0 then
-            -- Try to guess target from message context — often the player for self events
             local absorbTarget = playerName
             if event and string.find(event, "SELF", 1, true) then
                 absorbTarget = playerName
@@ -2802,7 +2837,7 @@ local parseFrame = CreateFrame("Frame")
 function Parser:OnLoad()
     playerName = UnitName("player")
 
-    -- Short window de-dupe (safety net for any residual double delivery)
+    -- Short window de-dupe so RAW + CHAT of the same line do not double-count
     local recentLine = {}
     local function ParseDeduped(evName, msg)
         if not msg or msg == "" then return end
@@ -2825,23 +2860,62 @@ function Parser:OnLoad()
 
     parseFrame:SetScript("OnEvent", function()
         if event == "RAW_COMBATLOG" then
-            -- SuperWoW enhanced path: arg1 = original CHAT event name, arg2 = text + GUIDs
+            -- SuperWoW: arg1 = original event name, arg2 = text with GUIDs
             if arg2 then
                 local cleaned = StripAndCacheGuids(arg2)
-                ParseDeduped(arg1, cleaned)
+                ParseDeduped(arg1 or event, cleaned)
             end
             return
         end
-        -- Standard Vanilla path (no SuperWoW)
         ParseDeduped(event, arg1)
     end)
 
-    if SuperWoWAvailable() then
-        -- SuperWoW: use RAW_COMBATLOG only. Do NOT also register CHAT_MSG combat
-        -- events — that was the source of double counting when texts differed
-        -- slightly after GUID stripping.
-        parseFrame:RegisterEvent("RAW_COMBATLOG")
+    -- Always register standard CHAT_MSG combat events so every mode works
+    -- without SuperWoW (and as a reliable baseline with SuperWoW).
+    local ev
+    for ev, _ in pairs(combatlog_events) do
+        parseFrame:RegisterEvent(ev)
+    end
 
+    local extraEvents = {
+        "CHAT_MSG_SPELL_AURA_GONE_SELF",
+        "CHAT_MSG_SPELL_AURA_GONE_OTHER",
+        "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",
+        "CHAT_MSG_SPELL_PERIODIC_CREATURE_BUFFS",
+        "CHAT_MSG_SPELL_SELF_BUFF",
+        "CHAT_MSG_SPELL_PARTY_BUFF",
+        "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF",
+        "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF",
+        "CHAT_MSG_SPELL_CREATURE_VS_SELF_BUFF",
+        "CHAT_MSG_SPELL_CREATURE_VS_PARTY_BUFF",
+        "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_BUFF",
+        "CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE",
+        "CHAT_MSG_SPELL_BREAK_AURA",
+        "CHAT_MSG_SPELL_SELF_DAMAGE",
+        "CHAT_MSG_SPELL_PARTY_DAMAGE",
+        "CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE",
+        "CHAT_MSG_SPELL_PET_DAMAGE",
+        "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF",
+        "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS",
+        "CHAT_MSG_COMBAT_HOSTILE_DEATH",
+        "CHAT_MSG_COMBAT_FRIENDLY_DEATH",
+    }
+    local i
+    for i = 1, table.getn(extraEvents) do
+        parseFrame:RegisterEvent(extraEvents[i])
+    end
+
+    if SuperWoWAvailable() then
+        -- Enhanced path on top of CHAT (message de-dupe prevents double counting)
+        parseFrame:RegisterEvent("RAW_COMBATLOG")
         if not Parser._guidTicker then
             local tick = CreateFrame("Frame")
             local elapsed = 0
@@ -2855,49 +2929,7 @@ function Parser:OnLoad()
             Parser._guidTicker = tick
         end
         RefreshGuidCacheFromUnits()
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r SuperWoW detected — RAW combat log path (no CHAT dual-parse).")
-    else
-        -- Standard 1.12 client: full CHAT_MSG combat log coverage for every mode
-        local ev
-        for ev, _ in pairs(combatlog_events) do
-            parseFrame:RegisterEvent(ev)
-        end
-
-        local extraEvents = {
-            "CHAT_MSG_SPELL_AURA_GONE_SELF",
-            "CHAT_MSG_SPELL_AURA_GONE_OTHER",
-            "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
-            "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS",
-            "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS",
-            "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_BUFFS",
-            "CHAT_MSG_SPELL_PERIODIC_CREATURE_BUFFS",
-            "CHAT_MSG_SPELL_SELF_BUFF",
-            "CHAT_MSG_SPELL_PARTY_BUFF",
-            "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF",
-            "CHAT_MSG_SPELL_HOSTILEPLAYER_BUFF",
-            "CHAT_MSG_SPELL_CREATURE_VS_SELF_BUFF",
-            "CHAT_MSG_SPELL_CREATURE_VS_PARTY_BUFF",
-            "CHAT_MSG_SPELL_CREATURE_VS_CREATURE_BUFF",
-            "CHAT_MSG_SPELL_PERIODIC_SELF_DAMAGE",
-            "CHAT_MSG_SPELL_PERIODIC_PARTY_DAMAGE",
-            "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_DAMAGE",
-            "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",
-            "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE",
-            "CHAT_MSG_SPELL_BREAK_AURA",
-            "CHAT_MSG_SPELL_SELF_DAMAGE",
-            "CHAT_MSG_SPELL_PARTY_DAMAGE",
-            "CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE",
-            "CHAT_MSG_SPELL_HOSTILEPLAYER_DAMAGE",
-            "CHAT_MSG_SPELL_PET_DAMAGE",
-            "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_SELF",
-            "CHAT_MSG_SPELL_DAMAGESHIELDS_ON_OTHERS",
-            "CHAT_MSG_COMBAT_HOSTILE_DEATH",
-            "CHAT_MSG_COMBAT_FRIENDLY_DEATH",
-        }
-        local i
-        for i = 1, table.getn(extraEvents) do
-            parseFrame:RegisterEvent(extraEvents[i])
-        end
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r SuperWoW detected — enhanced log + pet GUID path.")
     end
 end
 
