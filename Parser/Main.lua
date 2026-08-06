@@ -1637,6 +1637,29 @@ local DISPEL_SPELLS = {
     ["Restorative Potion"] = true,
 }
 
+-- Periodic / multi-tick cleanses. These apply a lasting effect that can remove
+-- multiple diseases/poisons over time. For them we ONLY credit direct combat-log
+-- lines that explicitly name the ability as the remover (e.g. "X's Abolish Disease
+-- removes Y from Z"). We never pair their cast with nearby "effect fades" messages,
+-- because the removals can happen long after the cast and the fades are unreliable
+-- for attribution.
+local PERIODIC_DISPEL_SPELLS = {
+    ["Abolish Disease"] = true,
+    ["Abolish Poison"] = true,
+    ["Poison Cleansing Totem"] = true,
+    ["Disease Cleansing Totem"] = true,
+}
+
+local function IsPeriodicDispelSpell(spell)
+    if not spell then return false end
+    if PERIODIC_DISPEL_SPELLS[spell] then return true end
+    for name, _ in pairs(PERIODIC_DISPEL_SPELLS) do
+        if string.find(spell, name, 1, true) then return true end
+    end
+    return false
+end
+
+
 local function IsInterruptSpell(spell)
     if not spell then return false end
     if INTERRUPT_SPELLS[spell] then return true end
@@ -1661,6 +1684,10 @@ end
 -- before or after "X casts Purify". Keep short buffers of both and pair the
 -- closest fade to each cast (prefer same target when known).
 -- Direct "X removes Y from Z" lines always win and suppress nearby fade pairing.
+--
+-- Exception: PERIODIC_DISPEL_SPELLS (Abolish Disease/Poison, cleansing totems)
+-- never enter the cast↔fade pairing path. Their removals are only credited when
+-- the combat log explicitly names the ability as the remover.
 local PENDING_DISPEL_WINDOW = 0.5
 local recentDispelFades = {}  -- { { spell, target, time }, ... }
 local pendingDispelCasts = {} -- { { caster, target, time }, ... }
@@ -1784,6 +1811,12 @@ local function DispelPairScore(castTime, castTarget, fadeTime, fadeTarget)
 end
 
 local function NoteDispelCast(caster, target, spellName)
+    -- Periodic cleanses (Abolish Disease/Poison, cleansing totems) must never
+    -- use cast↔fade pairing. Only explicit "SPELL removes EFFECT" lines count.
+    if IsPeriodicDispelSpell(spellName) then
+        return
+    end
+
     caster = ResolveSource(caster)
     if not caster then return end
     if not IsTracked(caster) and not OM.players[caster] then return end
