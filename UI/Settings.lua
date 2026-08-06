@@ -169,7 +169,7 @@ function UI:CreateSettingsFrame()
 
     local f = CreateFrame("Frame", "GreedMeterSettings", UIParent)
     f:SetWidth(460)
-    f:SetHeight(510)
+    f:SetHeight(540)
     f:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
     f:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -288,7 +288,7 @@ function UI:CreateSettingsFrame()
     local annLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     annLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
     annLabel:SetText("Announce channel:")
-    ry = ry - 20
+    ry = ry - 18
 
     local CHANNELS = { "AUTO", "SAY", "PARTY", "RAID" }
 
@@ -329,11 +329,11 @@ function UI:CreateSettingsFrame()
     UIDropDownMenu_SetSelectedID(dd, sel)
     f.channelDropDown = dd
 
-    ry = ry - 40
+    ry = ry - 36
     local rangeLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     rangeLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
     rangeLabel:SetText("Combat log range:")
-    ry = ry - 20
+    ry = ry - 18
 
     local RANGES = { 40, 100, 200 }
 
@@ -378,16 +378,16 @@ function UI:CreateSettingsFrame()
     f.rangeDropDown = rdd
 
     -- Bar style
-    ry = ry - 40
+    ry = ry - 36
     local styleLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     styleLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
     styleLabel:SetText("Bar style:")
-    ry = ry - 20
+    ry = ry - 18
 
     local BAR_STYLES = UI.BAR_STYLES or {
         { key = "Default", label = "Default" },
-        { key = "Smooth", label = "Smooth" },
-        { key = "Flat", label = "Flat" },
+        { key = "Smooth",  label = "Smooth" },
+        { key = "Flat",    label = "Flat" },
     }
 
     local function StyleDropDown_OnClick()
@@ -433,17 +433,17 @@ function UI:CreateSettingsFrame()
     f.styleDropDown = sdd
 
     -- Bar font
-    ry = ry - 40
+    ry = ry - 36
     local fontLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     fontLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
     fontLabel:SetText("Bar font:")
-    ry = ry - 20
+    ry = ry - 18
 
     local BAR_FONTS = UI.BAR_FONTS or {
-        { key = "Friz", label = "Friz Quadrata" },
-        { key = "Arial", label = "Arial Narrow" },
+        { key = "Friz",     label = "Friz Quadrata" },
+        { key = "Arial",    label = "Arial Narrow" },
         { key = "Morpheus", label = "Morpheus" },
-        { key = "Skurri", label = "Skurri" },
+        { key = "Skurri",   label = "Skurri" },
     }
 
     local function FontDropDown_OnClick()
@@ -489,11 +489,11 @@ function UI:CreateSettingsFrame()
     f.fontDropDown = fdd
 
     -- Number format
-    ry = ry - 40
+    ry = ry - 36
     local numLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     numLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
     numLabel:SetText("Number format:")
-    ry = ry - 20
+    ry = ry - 18
 
     local NUM_FORMATS = {
         { key = "1k",    label = "1k" },
@@ -547,14 +547,15 @@ function UI:CreateSettingsFrame()
     UIDropDownMenu_SetSelectedID(ndd, nsel)
     f.numFormatDropDown = ndd
 
-    -- Sliders below the checkbox column
-    AddSlider(f, "Bar height", 16, y, "barHeight", 10, 28, 1, 200)
-    y = y - 36
-    AddSlider(f, "Font size", 16, y, "fontSize", 8, 18, 1, 200)
-    y = y - 36
-    AddSlider(f, "Frame opacity", 16, y, "frameOpacity", 30, 100, 5, 200)
-    y = y - 36
-    AddSlider(f, "Announce lines", 16, y, "announceLines", 1, 20, 1, 200)
+    -- Sliders under the dropdowns (right column)
+    ry = ry - 42
+    AddSlider(f, "Bar height", rightX, ry, "barHeight", 10, 28, 1, 160)
+    ry = ry - 34
+    AddSlider(f, "Font size", rightX, ry, "fontSize", 8, 18, 1, 160)
+    ry = ry - 34
+    AddSlider(f, "Frame opacity", rightX, ry, "frameOpacity", 30, 100, 5, 160)
+    ry = ry - 34
+    AddSlider(f, "Announce lines", rightX, ry, "announceLines", 1, 20, 1, 160)
 
     local close = CreateButton(f, "Close", 70, 20, function()
         f:Hide()
@@ -565,7 +566,6 @@ function UI:CreateSettingsFrame()
     self.settingsFrame = f
     return f
 end
-
 
 function UI:ToggleSettings()
     if not OM.db then OM:InitDB() end
@@ -735,7 +735,6 @@ function UI:OnRosterUpdate()
     self:Refresh()
 end
 
-
 -- ============================================================
 -- Minimap button (OctoSpec-style angle drag)
 -- ============================================================
@@ -873,7 +872,6 @@ function UI:CreateMinimapButton()
     self.minimapButton = btn
     return btn
 end
-
 
 -- ============================================================
 -- Register
