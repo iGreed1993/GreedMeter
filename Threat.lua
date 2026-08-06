@@ -157,6 +157,108 @@ local function TankingModeEnabled()
 end
 
 -- ============================================================
+-- SuperWoW / GUID helpers
+-- SuperWoW: UnitExists(unit) returns exists, guid
+--           Unit* APIs accept a GUID string as the unit argument
+--           TargetUnit(guid) selects that exact unit
+-- ============================================================
+
+local function HasSuperWoW()
+    if OM and OM.HasSuperWoW then
+        return OM:HasSuperWoW()
+    end
+    return (SUPERWOW_VERSION or SUPERWOW_STRING or SuperWoW) and true or false
+end
+
+-- Returns a stable GUID string for a unit token, or nil
+local function GetUnitGUID(unit)
+    if not unit then return nil end
+    -- SuperWoW: second return of UnitExists is the GUID
+    local exists, guid = UnitExists(unit)
+    if exists and type(guid) == "string" and guid ~= "" and guid ~= unit then
+        -- Prefer values that look like GUIDs (0x...) when present
+        if string.find(guid, "0x") or string.len(guid) >= 8 then
+            return guid
+        end
+    end
+    -- Some SuperWoW / companion DLLs expose UnitGUID(unit)
+    if UnitGUID then
+        local g = UnitGUID(unit)
+        if type(g) == "string" and g ~= "" then
+            return g
+        end
+        -- GudaIO-style: UnitGUID returns hi, lo numbers
+        if type(g) == "number" then
+            local hi, lo = UnitGUID(unit)
+            if hi and lo then
+                return string.format("0x%08X%08X", hi, lo)
+            end
+        end
+    end
+    return nil
+end
+
+-- Short suffix for UI when multiple mobs share a name
+local function ShortGuidSuffix(guid)
+    if not guid or guid == "" then return nil end
+    local s = tostring(guid)
+    -- strip 0x prefix and take last 4 hex chars
+    s = string.gsub(s, "^0[xX]", "")
+    if string.len(s) > 4 then
+        s = string.sub(s, -4)
+    end
+    return s
+end
+
+-- Target a specific enemy by GUID (SuperWoW) or fall back to name
+local function TargetEnemy(entry)
+    if not entry then return end
+    local guid = entry.data and entry.data.guid
+    local name = entry.name
+    if guid and HasSuperWoW() then
+        -- SuperWoW accepts GUID as a unit token
+        if TargetUnit then
+            TargetUnit(guid)
+            return
+        end
+    end
+    if name and name ~= "" and TargetByName then
+        TargetByName(name, 1)
+    end
+end
+
+-- Remember the current hostile target as its own GUID-keyed enemy row
+-- (lets Tank mode accumulate distinct same-name mobs as you tab through them)
+local function RememberHostileTarget()
+    if not TankingModeEnabled() then return end
+    if not UnitExists("target") then return end
+    if UnitIsPlayer("target") or UnitIsFriend("player", "target") then return end
+
+    local name = UnitName("target") or "Enemy"
+    local guid = GetUnitGUID("target")
+    if not guid or guid == "" then
+        -- Without SuperWoW we cannot distinguish same-name mobs reliably
+        guid = "name:" .. name
+    end
+
+    local existing = Threat.tankModeThreats[guid]
+    if not existing then
+        Threat.tankModeThreats[guid] = {
+            creature  = name,
+            name      = name,
+            guid      = guid,
+            perc      = 0,
+            threat    = 0,
+            status    = "red",
+            estimated = not Threat.usingApi,
+        }
+    else
+        existing.name = name
+        existing.creature = existing.creature or name
+    end
+end
+
+-- ============================================================
 -- Local player threat modifiers (stance + buffs)
 -- ============================================================
 
@@ -338,13 +440,25 @@ local function ParseThreatPacket(packet)
                     table.insert(parts, string.sub(chunk, p, colon - 1))
                     p = colon + 1
                 end
-                -- creature:guid:name:perc
+                -- creature:guid:name:perc  (guid uniquely identifies each mob)
                 if table.getn(parts) >= 4 then
-                    local guid = parts[2]
+                    local creature = parts[1]
+                    local guid     = parts[2]
+                    local mobName  = parts[3]
+                    local perc     = tonumber(parts[4]) or 0
+                    -- Never collapse same-name mobs: GUID is the table key.
+                    -- If the server omits guid, synthesize a unique key per row.
+                    if not guid or guid == "" or guid == mobName or guid == creature then
+                        guid = "row:" .. tostring(creature) .. ":" .. tostring(mobName) .. ":" .. tostring(perc) .. ":" .. tostring(tp)
+                    end
+                    local prev = Threat.tankModeThreats[guid]
                     Threat.tankModeThreats[guid] = {
-                        creature = parts[1],
-                        name     = parts[3],
-                        perc     = tonumber(parts[4]) or 0,
+                        creature  = creature,
+                        name      = mobName,
+                        guid      = guid,
+                        perc      = perc,
+                        threat    = prev and prev.threat or perc,
+                        estimated = false,
                     }
                 end
             end
@@ -588,86 +702,116 @@ end
 function Threat:BuildEnemyList(hiddenNames)
     local list = {}
 
-    -- Prefer multi-mob API data
+    -- Multi-mob table is always GUID-keyed so same-name mobs stay distinct
     local guid, info
-    local hasApiEnemies = false
+    local count = 0
     for guid, info in pairs(self.tankModeThreats) do
-        hasApiEnemies = true
+        count = count + 1
         local name = info.name or info.creature or "?"
-        if not hiddenNames or not hiddenNames[name] then
+        -- Hide by exact display key or base name
+        local hideKey = guid or name
+        if not hiddenNames or (not hiddenNames[name] and not hiddenNames[hideKey]) then
             local perc = tonumber(info.perc) or 0
             local status = info.status or EnemyStatusFromPerc(perc)
-            -- Approximate absolute threat for ordering/bar length when API only gives %
             local threat = tonumber(info.threat)
             if not threat then
-                -- Scale so 100% sits near a readable value; ordering still works
                 threat = perc
             end
             table.insert(list, {
                 name  = name,
                 data  = {
-                    threat   = threat,
-                    perc     = perc,
-                    status   = status,
-                    isEnemy  = true,
-                    guid     = guid,
-                    creature = info.creature,
+                    threat    = threat,
+                    perc      = perc,
+                    status    = status,
+                    isEnemy   = true,
+                    guid      = info.guid or guid,
+                    creature  = info.creature,
                     estimated = info.estimated,
-                    isTest   = info.isTest,
+                    isTest    = info.isTest,
                 },
                 value = threat,
             })
         end
     end
 
-    -- Fallback: current target only (estimation / no multi-mob packet yet)
-    if not hasApiEnemies and UnitExists("target")
+    -- If the table is empty, at least show the current target (and remember it)
+    if count == 0 and UnitExists("target")
         and not UnitIsPlayer("target") and not UnitIsFriend("player", "target") then
+        RememberHostileTarget()
         local tName = UnitName("target") or "Target"
-        if not hiddenNames or not hiddenNames[tName] then
-            local me = UnitName("player")
-            local myData = me and self.threats[me]
-            local myThreat = myData and myData.threat or 0
-            local myPerc = myData and myData.perc or 0
-            local status
-            if UnitIsUnit("player", "targettarget") then
-                -- Find second place among known players for yellow/green
-                local second = 0
-                local n, d
-                for n, d in pairs(self.threats) do
-                    if n ~= me and not d.isPull and (d.threat or 0) > second then
-                        second = d.threat or 0
-                    end
+        local tGuid = GetUnitGUID("target") or ("name:" .. tName)
+        local me = UnitName("player")
+        local myData = me and self.threats[me]
+        local myThreat = myData and myData.threat or 0
+        local myPerc = myData and myData.perc or 0
+        local status
+        if UnitIsUnit("player", "targettarget") then
+            local second = 0
+            local n, d
+            for n, d in pairs(self.threats) do
+                if n ~= me and not d.isPull and (d.threat or 0) > second then
+                    second = d.threat or 0
                 end
-                status = EnemyStatusFromLead(myThreat, second)
-            else
-                status = "red"
             end
-            table.insert(list, {
-                name = tName,
-                data = {
-                    threat = myThreat,
-                    perc = myPerc,
-                    status = status,
-                    isEnemy = true,
-                    estimated = not self.usingApi,
-                },
-                value = myThreat,
-            })
+            status = EnemyStatusFromLead(myThreat, second)
+        else
+            status = "red"
         end
+        -- Update the remembered row with live numbers
+        if self.tankModeThreats[tGuid] then
+            self.tankModeThreats[tGuid].threat = myThreat
+            self.tankModeThreats[tGuid].perc = myPerc
+            self.tankModeThreats[tGuid].status = status
+        end
+        table.insert(list, {
+            name = tName,
+            data = {
+                threat = myThreat,
+                perc = myPerc,
+                status = status,
+                isEnemy = true,
+                guid = tGuid,
+                estimated = not self.usingApi,
+            },
+            value = myThreat,
+        })
     end
 
     -- Lowest threat first (enemies you are weakest on at the top)
     table.sort(list, function(a, b)
         if a.value == b.value then
-            return a.name < b.name
+            local ga = (a.data and a.data.guid) or a.name
+            local gb = (b.data and b.data.guid) or b.name
+            return tostring(ga) < tostring(gb)
         end
         return a.value < b.value
     end)
 
+    -- Disambiguate identical names: "Onyxian Whelp #1", "#2", ...
+    -- Prefer a short GUID suffix when SuperWoW GUIDs are available.
+    local nameCounts = {}
     local i
     for i = 1, table.getn(list) do
-        list[i].rank = i
+        local n = list[i].name
+        nameCounts[n] = (nameCounts[n] or 0) + 1
+    end
+    local nameIndex = {}
+    for i = 1, table.getn(list) do
+        local e = list[i]
+        e.rank = i
+        if nameCounts[e.name] and nameCounts[e.name] > 1 then
+            nameIndex[e.name] = (nameIndex[e.name] or 0) + 1
+            local suffix = ShortGuidSuffix(e.data and e.data.guid)
+            if suffix and not string.find(tostring(e.data.guid), "^name:")
+                and not string.find(tostring(e.data.guid), "^row:")
+                and not string.find(tostring(e.data.guid), "^test") then
+                e.displayName = e.name .. " [" .. suffix .. "]"
+            else
+                e.displayName = e.name .. " #" .. tostring(nameIndex[e.name])
+            end
+        else
+            e.displayName = e.name
+        end
     end
     return list
 end
@@ -845,13 +989,7 @@ local function GetThreatBarColor(name, data)
     return 0.6, 0.6, 0.6
 end
 
-local function TargetEnemyByName(name)
-    if not name or name == "" then return end
-    -- exact match when possible (1.12 TargetByName supports optional exact flag)
-    if TargetByName then
-        TargetByName(name, 1)
-    end
-end
+-- TargetEnemy is defined above with SuperWoW GUID support
 
 -- Drive the meter bars for threat mode. Frames.lua captures local copies of
 -- BuildSortedList / GetMetric / GetSecondaryText at load time, so replacing
@@ -1016,10 +1154,9 @@ function Threat:RefreshFrame(f)
             if bar.nameText then
                 if entry.data and entry.data.isPull then
                     bar.nameText:SetText(entry.name)
-                elseif isEnemy then
-                    bar.nameText:SetText(rank .. ". " .. entry.name)
                 else
-                    bar.nameText:SetText(rank .. ". " .. entry.name)
+                    local label = entry.displayName or entry.name
+                    bar.nameText:SetText(rank .. ". " .. label)
                 end
             end
             if bar.valueText then
@@ -1032,12 +1169,13 @@ function Threat:RefreshFrame(f)
 
             -- Tank mode: click a bar to target that enemy (taunt / switch assist).
             -- StatusBar is not a Button in 1.12, so OnClick is unavailable — use OnMouseUp.
+            -- With SuperWoW, TargetUnit(guid) selects the exact mob even when names match.
             if isEnemy then
                 bar:SetScript("OnMouseUp", function()
                     if arg1 ~= "LeftButton" then return end
                     local e = this.entry
-                    if e and e.name then
-                        TargetEnemyByName(e.name)
+                    if e then
+                        TargetEnemy(e)
                     end
                 end)
             else
@@ -1355,17 +1493,26 @@ eventFrame:SetScript("OnEvent", function()
             end
         end
     elseif event == "PLAYER_TARGET_CHANGED" then
+        -- Do NOT wipe tankModeThreats here — Tank mode needs to keep every
+        -- distinct GUID (including multiple same-name mobs) across target swaps.
         ClearThreatTable()
-        ClearTankModeTable()
         Threat.usingApi = false
         Threat.targetName = UnitName("target")
+        RememberHostileTarget()
         if Threat:AnyFrameInThreatMode() and UI.Refresh then
             UI:Refresh()
+        end
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        -- Leaving combat: drop the accumulated enemy list
+        if not OM:GetSetting("testMode") then
+            ClearTankModeTable()
         end
     elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
         if not IsInGroup() then
             ClearThreatTable()
-            ClearTankModeTable()
+            if not OM:GetSetting("testMode") then
+                ClearTankModeTable()
+            end
             Threat.usingApi = false
             if Threat:AnyFrameInThreatMode() and UI.Refresh then
                 UI:Refresh()
