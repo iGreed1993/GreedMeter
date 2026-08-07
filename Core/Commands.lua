@@ -15,15 +15,7 @@ SlashCmdList["GREEDMETER"] = function(msg)
     arg = arg or ""
 
     if cmd == "reset" then
-        -- Clear data before module handlers (Fire order via pairs is undefined)
-        if OM.data then
-            OM.data.current = { players = {}, startTime = 0, endTime = 0, label = "Current", isBoss = false, duration = 0 }
-            OM.data.overall = { players = {}, startTime = 0, endTime = 0, label = "Overall", isBoss = false, duration = 0 }
-            OM.data.recentFights = {}
-            OM.data.bossFights = {}
-        end
-        OM:UpdateGroupRoster()
-        OM:Fire("OnReset")
+        OM:ResetData()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Data reset.")
     elseif cmd == "test" then
         OM:LoadTestData()

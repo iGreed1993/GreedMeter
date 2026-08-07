@@ -25,6 +25,11 @@ OM.data = {
 local MAX_RECENT_FIGHTS = 3
 local MAX_BOSS_FIGHTS = 5
 
+-- Soft caps on per-player detail lists so overall / long sessions stay bounded.
+-- Counts remain accurate; only the stored event history is trimmed (oldest first).
+local MAX_DETAIL_LIST = 80   -- dispels / interrupts / ccBreaks / per-enemy CC applications
+local MAX_DEATHS_LIST = 40
+
 -- Per-fight enemy tracking for naming + boss detection
 local fightEnemies = {}        -- [name] = damage dealt to them by group
 local fightEnemyDeaths = {}    -- [name] = how many times this name died this fight
@@ -52,6 +57,39 @@ local function NormalizeName(name)
     return name
 end
 
+-- Exact match first, then substring (handles rank suffixes / variants).
+-- Used by absorb / interrupt / dispel / CC spell tables.
+local function SpellLookup(set, spell)
+    if not spell or not set then return nil end
+    local v = set[spell]
+    if v ~= nil then return v end
+    local name, val
+    for name, val in pairs(set) do
+        if string.find(spell, name, 1, true) then
+            return val
+        end
+    end
+    return nil
+end
+
+local function SpellInSet(set, spell)
+    return SpellLookup(set, spell) ~= nil
+end
+
+-- Iterate player + party + raid unit tokens once.
+local function ForEachGroupUnit(fn)
+    if not fn then return end
+    fn("player")
+    local i
+    for i = 1, 4 do
+        fn("party" .. i)
+    end
+    if GetNumRaidMembers() > 0 then
+        for i = 1, 40 do
+            fn("raid" .. i)
+        end
+    end
+end
 
 -- ============================================================
 -- SuperWoW helpers (preferred path when available)
@@ -285,12 +323,7 @@ local recentShieldByTarget = {}
 local RECENT_CASTER_TIMEOUT = 8
 
 local function IsAbsorbShield(spell)
-    if not spell then return false end
-    if ABSORB_SHIELDS[spell] then return true end
-    for name, _ in pairs(ABSORB_SHIELDS) do
-        if string.find(spell, name, 1, true) then return true end
-    end
-    return false
+    return SpellInSet(ABSORB_SHIELDS, spell)
 end
 
 local function NoteRecentAbsorbCaster(spell, caster, target)
@@ -381,8 +414,7 @@ end
 -- Average max HP of group members (party/raid). Falls back to the player alone.
 local function GetGroupAverageMaxHP()
     local total, count = 0, 0
-
-    local function addUnit(unit)
+    ForEachGroupUnit(function(unit)
         if UnitExists(unit) and UnitIsConnected(unit) then
             local hp = UnitHealthMax(unit)
             if hp and hp > 0 then
@@ -390,18 +422,7 @@ local function GetGroupAverageMaxHP()
                 count = count + 1
             end
         end
-    end
-
-    addUnit("player")
-    for i = 1, 4 do
-        addUnit("party"..i)
-    end
-    if GetNumRaidMembers() > 0 then
-        for i = 1, 40 do
-            addUnit("raid"..i)
-        end
-    end
-
+    end)
     if count == 0 then
         return UnitHealthMax("player") or 1
     end
@@ -411,7 +432,7 @@ end
 -- Average player level in the group (for level-gated elite checks)
 local function GetGroupAverageLevel()
     local total, count = 0, 0
-    local function addUnit(unit)
+    ForEachGroupUnit(function(unit)
         if UnitExists(unit) and UnitIsConnected(unit) then
             local lvl = UnitLevel(unit)
             if lvl and lvl > 0 then
@@ -419,12 +440,7 @@ local function GetGroupAverageLevel()
                 count = count + 1
             end
         end
-    end
-    addUnit("player")
-    for i = 1, 4 do addUnit("party"..i) end
-    if GetNumRaidMembers() > 0 then
-        for i = 1, 40 do addUnit("raid"..i) end
-    end
+    end)
     if count == 0 then return UnitLevel("player") or 1 end
     return total / count
 end
@@ -676,6 +692,14 @@ local function PushFront(list, entry, maxCount)
     end
 end
 
+-- Append then drop oldest when over the soft cap (chronological history).
+local function PushCapped(list, entry, maxCount)
+    table.insert(list, entry)
+    while table.getn(list) > maxCount do
+        table.remove(list, 1)
+    end
+end
+
 -- Last damage dealt TO a unit (for CC break attribution + death killing blow)
 -- lastHitOn[target] = { source, spell, amount, time }
 local lastHitOn = {}
@@ -851,7 +875,7 @@ function Parser:AddDispel(source, what, target)
         local p = EnsurePlayer(seg, source)
         if not p then return end
         p.dispels.count = p.dispels.count + 1
-        table.insert(p.dispels.list, what)
+        PushCapped(p.dispels.list, what, MAX_DETAIL_LIST)
         if not p.dispels.targets then
             p.dispels.targets = {}
         end
@@ -870,12 +894,12 @@ function Parser:AddInterrupt(source, what)
     local p = EnsurePlayer(OM.data.current, source)
     if p then
         p.interrupts.count = p.interrupts.count + 1
-        table.insert(p.interrupts.list, what or "Unknown")
+        PushCapped(p.interrupts.list, what or "Unknown", MAX_DETAIL_LIST)
     end
     local o = EnsurePlayer(OM.data.overall, source)
     if o then
         o.interrupts.count = o.interrupts.count + 1
-        table.insert(o.interrupts.list, what or "Unknown")
+        PushCapped(o.interrupts.list, what or "Unknown", MAX_DETAIL_LIST)
     end
 end
 
@@ -908,12 +932,7 @@ local BREAKABLE_CC = {
 local activeBreakable = {}
 
 local function IsBreakableCC(spell)
-    if not spell then return false end
-    if BREAKABLE_CC[spell] then return true end
-    for name, _ in pairs(BREAKABLE_CC) do
-        if string.find(spell, name, 1, true) then return true end
-    end
-    return false
+    return SpellInSet(BREAKABLE_CC, spell)
 end
 
 local function EnsureCCTargets(seg)
@@ -946,7 +965,7 @@ function Parser:AddEnemyCC(spell, target, maxDuration)
         local e = EnsureCCTargetEntry(seg, target)
         e.count = e.count + 1
         e.duration = (e.duration or 0) + maxDuration
-        table.insert(e.list, { spell = spell, duration = maxDuration })
+        PushCapped(e.list, { spell = spell, duration = maxDuration }, MAX_DETAIL_LIST)
     end
     apply(OM.data.current)
     apply(OM.data.overall)
@@ -990,12 +1009,12 @@ function Parser:AddCCBreak(breaker, ccSpell, target)
     local p = EnsurePlayer(OM.data.current, breaker)
     if p then
         p.ccBreaks.count = p.ccBreaks.count + 1
-        table.insert(p.ccBreaks.list, { spell = ccSpell, target = target })
+        PushCapped(p.ccBreaks.list, { spell = ccSpell, target = target }, MAX_DETAIL_LIST)
     end
     local o = EnsurePlayer(OM.data.overall, breaker)
     if o then
         o.ccBreaks.count = o.ccBreaks.count + 1
-        table.insert(o.ccBreaks.list, { spell = ccSpell, target = target })
+        PushCapped(o.ccBreaks.list, { spell = ccSpell, target = target }, MAX_DETAIL_LIST)
     end
 end
 
@@ -1019,11 +1038,11 @@ function Parser:AddDeath(name, lastHit)
         if not p then return end
         p.deaths.count = (p.deaths.count or 0) + 1
         if not p.deaths.list then p.deaths.list = {} end
-        table.insert(p.deaths.list, {
+        PushCapped(p.deaths.list, {
             killer = killer,
             spell = spell,
             amount = amount,
-        })
+        }, MAX_DEATHS_LIST)
     end
     apply(OM.data.current)
     apply(OM.data.overall)
@@ -1651,33 +1670,17 @@ local PERIODIC_DISPEL_SPELLS = {
 }
 
 local function IsPeriodicDispelSpell(spell)
-    if not spell then return false end
-    if PERIODIC_DISPEL_SPELLS[spell] then return true end
-    for name, _ in pairs(PERIODIC_DISPEL_SPELLS) do
-        if string.find(spell, name, 1, true) then return true end
-    end
-    return false
+    return SpellInSet(PERIODIC_DISPEL_SPELLS, spell)
 end
 
-
 local function IsInterruptSpell(spell)
-    if not spell then return false end
-    if INTERRUPT_SPELLS[spell] then return true end
-    for name, _ in pairs(INTERRUPT_SPELLS) do
-        if string.find(spell, name, 1, true) then return true end
-    end
-    return false
+    return SpellInSet(INTERRUPT_SPELLS, spell)
 end
 -- Exposed for AddDamage (defined earlier in the file)
 Parser.IsInterruptAbility = IsInterruptSpell
 
 local function IsDispelSpell(spell)
-    if not spell then return false end
-    if DISPEL_SPELLS[spell] then return true end
-    for name, _ in pairs(DISPEL_SPELLS) do
-        if string.find(spell, name, 1, true) then return true end
-    end
-    return false
+    return SpellInSet(DISPEL_SPELLS, spell)
 end
 
 -- Dispel matching: combat log order is unreliable. The fade line can appear
@@ -2142,16 +2145,7 @@ local HARD_CC_SPELLS = {
 }
 
 local function GetHardCCDuration(spell)
-    if not spell then return nil end
-    if HARD_CC_SPELLS[spell] then
-        return HARD_CC_SPELLS[spell]
-    end
-    for name, dur in pairs(HARD_CC_SPELLS) do
-        if string.find(spell, name, 1, true) then
-            return dur
-        end
-    end
-    return nil
+    return SpellLookup(HARD_CC_SPELLS, spell)
 end
 
 local function IsHardCCSpell(spell)

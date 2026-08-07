@@ -71,6 +71,19 @@ function OM:StopCombat()
     self:Fire("OnCombatEnd", duration)
 end
 
+-- Single reset entry point used by /gdm reset and the UI reset button.
+-- Parser:OnReset (fired first) owns clearing combat data; other modules
+-- clear their own state. Avoids the previous double-clear in Commands/Frames.
+function OM:ResetData()
+    if self.SetSetting then
+        self:SetSetting("testMode", false)
+    end
+    if self.UpdateGroupRoster then
+        self:UpdateGroupRoster()
+    end
+    self:Fire("OnReset")
+end
+
 -- ============================================================
 -- Module system (simple event bus)
 -- ============================================================

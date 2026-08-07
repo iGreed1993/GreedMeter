@@ -70,8 +70,15 @@ OM.defaults = OM.defaults or {}
 if OM.defaults.enableThreatMode == nil then
     OM.defaults.enableThreatMode = false
 end
-if OM.defaults.enableTankingMode == nil then
-    OM.defaults.enableTankingMode = false
+-- threatView: "single" | "tank" | "overall" | "all"
+if OM.defaults.threatView == nil then
+    OM.defaults.threatView = "single"
+end
+-- Migrate legacy checkbox
+if OM.defaults.enableTankingMode ~= nil then
+    if OM.defaults.enableTankingMode and OM.defaults.threatView == "single" then
+        OM.defaults.threatView = "tank"
+    end
 end
 
 -- ============================================================
@@ -89,6 +96,7 @@ Threat.lastApiTime         = 0
 Threat.apiTimeout          = 4.0
 Threat.threats             = {}   -- [name] = { threat, perc, tank, tps, class, melee, estimated }
 Threat.tankModeThreats     = {}   -- [guid] = { creature, name, perc }  (API tank-mode multi-mob)
+Threat.overallThreat       = {}   -- [name] = { threat, class, estimated }  fight-total threat generated
 Threat.targetName          = nil
 Threat.tankName            = nil
 Threat.queryInterval       = 0.55
@@ -151,9 +159,48 @@ local function ClearTankModeTable()
     end
 end
 
+-- threatView setting: single | tank | overall | all
+local function GetThreatView()
+    local v = OM:GetSetting("threatView")
+    if v == "tank" or v == "overall" or v == "all" or v == "single" then
+        return v
+    end
+    -- Legacy migration from enableTankingMode checkbox
+    if OM:GetSetting("enableTankingMode") == true then
+        return "tank"
+    end
+    return "single"
+end
+
+local function IsThreatModeKey(mode)
+    return mode == "threat" or mode == "tank" or mode == "overall"
+end
+
+-- Effective view for a given frame mode
+local function EffectiveView(mode)
+    if mode == "tank" then return "tank" end
+    if mode == "overall" then return "overall" end
+    if mode == "threat" then
+        local v = GetThreatView()
+        if v == "all" or v == "single" then return "single" end
+        return v -- tank or overall when only that mode is registered as "threat"
+    end
+    return "single"
+end
+
+local function TankViewActive(mode)
+    return EffectiveView(mode or "threat") == "tank"
+end
+
+local function OverallViewActive(mode)
+    return EffectiveView(mode or "threat") == "overall"
+end
+
+-- Back-compat alias used in a few places
 local function TankingModeEnabled()
-    return OM:GetSetting("enableThreatMode") == true
-        and OM:GetSetting("enableTankingMode") == true
+    if not OM:GetSetting("enableThreatMode") then return false end
+    local v = GetThreatView()
+    return v == "tank" or v == "all"
 end
 
 -- ============================================================
@@ -440,24 +487,28 @@ local function ParseThreatPacket(packet)
                     table.insert(parts, string.sub(chunk, p, colon - 1))
                     p = colon + 1
                 end
-                -- creature:guid:name:perc  (guid uniquely identifies each mob)
+                -- TWThreat TMTv1: creature:guid:secondPlayer:secondPerc
+                -- creature = mob name, name = runner-up player, perc = their threat %
+                -- Presence of a row means YOU are tanking that mob.
                 if table.getn(parts) >= 4 then
                     local creature = parts[1]
                     local guid     = parts[2]
-                    local mobName  = parts[3]
-                    local perc     = tonumber(parts[4]) or 0
-                    -- Never collapse same-name mobs: GUID is the table key.
-                    -- If the server omits guid, synthesize a unique key per row.
-                    if not guid or guid == "" or guid == mobName or guid == creature then
-                        guid = "row:" .. tostring(creature) .. ":" .. tostring(mobName) .. ":" .. tostring(perc) .. ":" .. tostring(tp)
+                    local secondPlayer = parts[3]
+                    local secondPerc   = tonumber(parts[4]) or 0
+                    if not guid or guid == "" or guid == secondPlayer or guid == creature then
+                        guid = "row:" .. tostring(creature) .. ":" .. tostring(secondPlayer) .. ":" .. tostring(secondPerc) .. ":" .. tostring(tp)
                     end
-                    local prev = Threat.tankModeThreats[guid]
+                    local status = (secondPerc >= 90) and "yellow" or "green"
+                    -- Sort key: more contested (higher second %) → lower value → nearer top
+                    local threat = math.max(1, 100 - secondPerc)
                     Threat.tankModeThreats[guid] = {
                         creature  = creature,
-                        name      = mobName,
+                        name      = secondPlayer, -- runner-up (kept for tooltip)
                         guid      = guid,
-                        perc      = perc,
-                        threat    = prev and prev.threat or perc,
+                        perc      = 100,          -- you are the tank on this row
+                        secondPerc = secondPerc,
+                        threat    = threat,
+                        status    = status,
                         estimated = false,
                     }
                 end
@@ -465,8 +516,9 @@ local function ParseThreatPacket(packet)
         end
     end
 
-    -- Pull-aggro threshold is part of normal Threat mode (player list)
+    -- Pull-aggro threshold is part of single-target Threat view
     Threat:AddPullAggroRow()
+    Threat:UpdateOverallFromPlayerThreats()
 
     return true
 end
@@ -664,6 +716,7 @@ local function BuildEstimatedThreat()
     end
 
     Threat:AddPullAggroRow()
+    Threat:UpdateOverallFromPlayerThreats()
 end
 
 -- ============================================================
@@ -699,26 +752,110 @@ local function EnemyStatusFromLead(myThreat, secondThreat)
     return "green"
 end
 
+-- Live snapshot of the player's threat situation on the current target
+local function CurrentTargetThreatSnapshot()
+    local me = UnitName("player")
+    local myData = me and Threat.threats[me]
+    local myThreat = myData and (myData.threat or 0) or 0
+    local myPerc = myData and (myData.perc or 0) or 0
+    local iAmTanking = UnitExists("targettarget") and UnitIsUnit("player", "targettarget")
+    local second = 0
+    local n, d
+    for n, d in pairs(Threat.threats) do
+        if n ~= me and not d.isPull and (d.threat or 0) > second then
+            second = d.threat or 0
+        end
+    end
+
+    local status
+    if iAmTanking then
+        status = EnemyStatusFromLead(myThreat, second)
+        -- Ensure non-zero so bars render while tanking even if API/estimate is lagging
+        if myThreat <= 0 then
+            myThreat = 1
+            myPerc = 100
+        end
+    else
+        status = "red"
+        if myThreat <= 0 and myPerc <= 0 then
+            -- still show the row; 0 threat is valid when you have no aggro
+            myThreat = 0
+        end
+    end
+    return myThreat, myPerc, status, iAmTanking
+end
+
 function Threat:BuildEnemyList(hiddenNames)
     local list = {}
 
-    -- Multi-mob table is always GUID-keyed so same-name mobs stay distinct
+    -- Always remember / refresh the current hostile target so the list is not stuck at 0
+    if UnitExists("target")
+        and not UnitIsPlayer("target") and not UnitIsFriend("player", "target") then
+        RememberHostileTarget()
+        local tName = UnitName("target") or "Target"
+        local tGuid = GetUnitGUID("target") or ("name:" .. tName)
+        local myThreat, myPerc, status = CurrentTargetThreatSnapshot()
+        local row = self.tankModeThreats[tGuid]
+        if row then
+            row.name = tName
+            row.creature = row.creature or tName
+            row.threat = myThreat
+            row.perc = myPerc
+            row.status = status
+            -- Prefer live numbers over a stale API row for the active target
+            if myThreat > 0 or status ~= "red" then
+                row.estimated = not self.usingApi
+            end
+        end
+    end
+
+    -- Multi-mob table is GUID-keyed so same-name mobs stay distinct
     local guid, info
-    local count = 0
     for guid, info in pairs(self.tankModeThreats) do
-        count = count + 1
-        local name = info.name or info.creature or "?"
-        -- Hide by exact display key or base name
-        local hideKey = guid or name
-        if not hiddenNames or (not hiddenNames[name] and not hiddenNames[hideKey]) then
+        local mobName = info.creature or info.name or "?"
+        -- TWThreat TMTv1 format: creature=mob, name=second-highest PLAYER, perc=their %
+        -- Our estimation rows use name=mob. Prefer creature when it looks like a mob label.
+        if info.creature and info.creature ~= "" then
+            mobName = info.creature
+        end
+        local hideKey = guid or mobName
+        if not hiddenNames or (not hiddenNames[mobName] and not hiddenNames[hideKey]) then
             local perc = tonumber(info.perc) or 0
-            local status = info.status or EnemyStatusFromPerc(perc)
-            local threat = tonumber(info.threat)
-            if not threat then
+            local threat = tonumber(info.threat) or 0
+            local status = info.status
+            local estimated = info.estimated
+
+            -- API tank-mode rows: you are tanking this mob; perc is the runner-up's %
+            if not info.isTest and not estimated and (info.guid or guid)
+                and not string.find(tostring(guid), "^name:")
+                and not string.find(tostring(guid), "^row:")
+                and status == nil then
+                -- Tanking: contested if second place is high
+                if perc >= 90 then
+                    status = "yellow"
+                else
+                    status = "green"
+                end
+                -- Sort key: lower margin → lower value → sorts nearer the top (danger)
+                if threat <= 0 then
+                    threat = math.max(1, 100 - perc)
+                end
+                -- Display perc as YOUR share (you're the tank on this row)
+                perc = 100
+            end
+
+            if not status then
+                status = EnemyStatusFromPerc(perc)
+            end
+            if threat <= 0 and status ~= "red" then
+                threat = 1
+            end
+            if threat <= 0 and perc > 0 then
                 threat = perc
             end
+
             table.insert(list, {
-                name  = name,
+                name  = mobName,
                 data  = {
                     threat    = threat,
                     perc      = perc,
@@ -726,55 +863,13 @@ function Threat:BuildEnemyList(hiddenNames)
                     isEnemy   = true,
                     guid      = info.guid or guid,
                     creature  = info.creature,
-                    estimated = info.estimated,
+                    estimated = estimated,
                     isTest    = info.isTest,
+                    secondPlayer = (info.name and info.creature and info.name ~= info.creature) and info.name or nil,
                 },
                 value = threat,
             })
         end
-    end
-
-    -- If the table is empty, at least show the current target (and remember it)
-    if count == 0 and UnitExists("target")
-        and not UnitIsPlayer("target") and not UnitIsFriend("player", "target") then
-        RememberHostileTarget()
-        local tName = UnitName("target") or "Target"
-        local tGuid = GetUnitGUID("target") or ("name:" .. tName)
-        local me = UnitName("player")
-        local myData = me and self.threats[me]
-        local myThreat = myData and myData.threat or 0
-        local myPerc = myData and myData.perc or 0
-        local status
-        if UnitIsUnit("player", "targettarget") then
-            local second = 0
-            local n, d
-            for n, d in pairs(self.threats) do
-                if n ~= me and not d.isPull and (d.threat or 0) > second then
-                    second = d.threat or 0
-                end
-            end
-            status = EnemyStatusFromLead(myThreat, second)
-        else
-            status = "red"
-        end
-        -- Update the remembered row with live numbers
-        if self.tankModeThreats[tGuid] then
-            self.tankModeThreats[tGuid].threat = myThreat
-            self.tankModeThreats[tGuid].perc = myPerc
-            self.tankModeThreats[tGuid].status = status
-        end
-        table.insert(list, {
-            name = tName,
-            data = {
-                threat = myThreat,
-                perc = myPerc,
-                status = status,
-                isEnemy = true,
-                guid = tGuid,
-                estimated = not self.usingApi,
-            },
-            value = myThreat,
-        })
     end
 
     -- Lowest threat first (enemies you are weakest on at the top)
@@ -787,8 +882,7 @@ function Threat:BuildEnemyList(hiddenNames)
         return a.value < b.value
     end)
 
-    -- Disambiguate identical names: "Onyxian Whelp #1", "#2", ...
-    -- Prefer a short GUID suffix when SuperWoW GUIDs are available.
+    -- Disambiguate identical names
     local nameCounts = {}
     local i
     for i = 1, table.getn(list) do
@@ -820,13 +914,192 @@ end
 -- Sorted list for the meter
 -- ============================================================
 
-function Threat:GetSortedList(hiddenNames)
-    -- Tank mode → enemy list
-    if TankingModeEnabled() then
-        return self:BuildEnemyList(hiddenNames)
+-- Accumulate fight-total threat generated per player (not target-specific)
+function Threat:UpdateOverallFromPlayerThreats()
+    local name, data
+    for name, data in pairs(self.threats) do
+        if name and not data.isPull then
+            local t = data.threat or 0
+            local prev = self.overallThreat[name]
+            local prevT = prev and prev.threat or 0
+            -- Track peak observed on any target + blend with cumulative estimate
+            local best = t
+            if prevT > best then best = prevT end
+            -- If threat rose this tick, add the delta as "generated"
+            local hist = self.history[name]
+            if hist and hist.threat and t > hist.threat then
+                best = prevT + (t - hist.threat)
+            end
+            self.overallThreat[name] = {
+                threat    = best,
+                class     = data.class or GetPlayerClass(name),
+                estimated = data.estimated,
+                tank      = data.tank,
+            }
+        end
+    end
+end
+
+-- Enemies currently targeting a given player (group-visible hostile units)
+-- Returns ordered list of unique enemy names.
+function Threat:GetEnemiesTargetingPlayer(playerName)
+    local names = {}
+    if not playerName or playerName == "" then return names end
+
+    local seen = {}
+
+    local function considerEnemyUnit(unit)
+        if not unit or not UnitExists(unit) then return end
+        if UnitIsPlayer(unit) or UnitIsFriend("player", unit) then return end
+        if UnitIsDead(unit) or UnitIsCorpse(unit) then return end
+        local tt = unit .. "target"
+        if not UnitExists(tt) then return end
+        if UnitName(tt) ~= playerName then return end
+        local enemyName = UnitName(unit)
+        if not enemyName or enemyName == "" then return end
+        local key = GetUnitGUID(unit) or (enemyName .. ":" .. tostring(UnitHealth(unit)))
+        if seen[key] then return end
+        seen[key] = true
+        table.insert(names, enemyName)
     end
 
-    -- Normal Threat mode → players + Pull Aggro row
+    -- Direct unit tokens
+    considerEnemyUnit("target")
+    considerEnemyUnit("mouseover")
+    considerEnemyUnit("pettarget")
+
+    -- Party / raid members' targets (common way to see adds in 1.12)
+    local i
+    for i = 1, 4 do
+        considerEnemyUnit("party" .. i .. "target")
+        considerEnemyUnit("partypet" .. i .. "target")
+    end
+    for i = 1, 40 do
+        considerEnemyUnit("raid" .. i .. "target")
+        considerEnemyUnit("raidpet" .. i .. "target")
+    end
+
+    -- SuperWoW: known GUID-keyed enemies can be addressed as unit tokens
+    if HasSuperWoW() then
+        local guid, info
+        for guid, info in pairs(self.tankModeThreats) do
+            if type(guid) == "string" and not string.find(guid, "^name:")
+                and not string.find(guid, "^row:")
+                and not string.find(guid, "^test") then
+                considerEnemyUnit(guid)
+            end
+        end
+    end
+
+    return names
+end
+
+-- Stable fake "targeted by" lists for Test mode previews
+local function FakeTargetingForTest(playerName, isTank)
+    if isTank then
+        return { "Onyxia", "Onyxian Warder", "Onyxian Warder", "Onyxian Guard" }
+    end
+    -- Lightweight pseudo-random from name length so rows look different
+    local n = string.len(playerName or "")
+    if math.mod(n, 5) == 0 then
+        return { "Onyxian Whelp" }
+    elseif math.mod(n, 5) == 1 then
+        return { "Onyxian Whelp", "Onyxian Whelp" }
+    elseif math.mod(n, 5) == 2 then
+        return { "Lava Spawn" }
+    end
+    return {}
+end
+
+function Threat:BuildOverallList(hiddenNames)
+    local list = {}
+    local name, data
+    for name, data in pairs(self.overallThreat) do
+        if not hiddenNames or not hiddenNames[name] then
+            local value = data.threat or 0
+            if value > 0 then
+                local targeting = self:GetEnemiesTargetingPlayer(name)
+                if self.testDataActive and table.getn(targeting) == 0 then
+                    targeting = FakeTargetingForTest(name, data.tank)
+                end
+                table.insert(list, {
+                    name = name,
+                    data = {
+                        threat         = value,
+                        perc           = 0,
+                        tank           = data.tank,
+                        tps            = 0,
+                        class          = data.class,
+                        estimated      = data.estimated,
+                        isOverall      = true,
+                        isTest         = self.testDataActive,
+                        targetedBy     = targeting,
+                        targetedByCount = table.getn(targeting),
+                    },
+                    value = value,
+                })
+            end
+        end
+    end
+    -- Also include anyone present only in current target threats
+    for name, data in pairs(self.threats) do
+        if not data.isPull and (not self.overallThreat[name] or (self.overallThreat[name].threat or 0) <= 0) then
+            if not hiddenNames or not hiddenNames[name] then
+                local value = data.threat or 0
+                if value > 0 then
+                    local targeting = self:GetEnemiesTargetingPlayer(name)
+                    if self.testDataActive and table.getn(targeting) == 0 then
+                        targeting = FakeTargetingForTest(name, data.tank)
+                    end
+                    table.insert(list, {
+                        name = name,
+                        data = {
+                            threat         = value,
+                            perc           = data.perc or 0,
+                            tank           = data.tank,
+                            tps            = data.tps or 0,
+                            class          = data.class,
+                            estimated      = data.estimated,
+                            isOverall      = true,
+                            isTest         = self.testDataActive,
+                            targetedBy     = targeting,
+                            targetedByCount = table.getn(targeting),
+                        },
+                        value = value,
+                    })
+                end
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.value == b.value then return a.name < b.name end
+        return a.value > b.value
+    end)
+    local maxVal = 0
+    if list[1] then maxVal = list[1].value or 0 end
+    local i
+    for i = 1, table.getn(list) do
+        list[i].rank = i
+        if maxVal > 0 then
+            list[i].data.perc = math.floor((list[i].value / maxVal) * 100 + 0.5)
+        end
+    end
+    return list
+end
+
+function Threat:GetSortedList(hiddenNames, mode)
+    mode = mode or "threat"
+    local view = EffectiveView(mode)
+
+    if view == "tank" then
+        return self:BuildEnemyList(hiddenNames)
+    end
+    if view == "overall" then
+        self:UpdateOverallFromPlayerThreats()
+        return self:BuildOverallList(hiddenNames)
+    end
+
+    -- Single-target Threat mode → players + Pull Aggro row
     local list = {}
     local name, data
     for name, data in pairs(self.threats) do
@@ -873,7 +1146,18 @@ function Threat:AnyFrameInThreatMode()
     if not UI or not UI.frames then return false end
     local _, f
     for _, f in ipairs(UI.frames) do
-        if f.mode == "threat" and f:IsShown() then
+        if f:IsShown() and IsThreatModeKey(f.mode) then
+            return true
+        end
+    end
+    return false
+end
+
+function Threat:AnyFrameInTankView()
+    if not UI or not UI.frames then return false end
+    local _, f
+    for _, f in ipairs(UI.frames) do
+        if f:IsShown() and TankViewActive(f.mode) then
             return true
         end
     end
@@ -888,7 +1172,7 @@ end
 local function FormatThreatSecondary(data)
     if not data then return "0" end
 
-    -- Enemy row (Tank mode)
+    -- Enemy row (Tank view)
     if data.isEnemy then
         local perc = data.perc or 0
         local threat = data.threat or 0
@@ -906,6 +1190,21 @@ local function FormatThreatSecondary(data)
         else
             text = text .. " LOST"
         end
+        if data.estimated then text = text .. "*" end
+        return text
+    end
+
+    -- Overall fight threat — parentheses show # of enemies currently targeting them
+    if data.isOverall then
+        local threat = data.threat or 0
+        local count = data.targetedByCount or 0
+        local text
+        if UI.FormatNumber then
+            text = UI.FormatNumber(threat)
+        else
+            text = tostring(math.floor(threat + 0.5))
+        end
+        text = text .. " (" .. tostring(count) .. ")"
         if data.estimated then text = text .. "*" end
         return text
     end
@@ -972,15 +1271,18 @@ local function GetThreatBarColor(name, data)
     if OM.GetSetting and OM:GetSetting("classColors") == false then
         return 0.55, 0.55, 0.55
     end
+    -- Pull Aggro threshold row stays distinct (not a player)
     if data and data.isPull then
         return 1.0, 0.35, 0.35
     end
-    if data and data.tank then
-        return 0.2, 0.6, 1.0
-    end
+    -- Always use class color for players (including the current tank)
     local class = data and data.class
     if not class and OM.players and OM.players[name] then
         class = OM.players[name].class
+    end
+    if not class and name == UnitName("player") then
+        local _, c = UnitClass("player")
+        class = c
     end
     local colors = UI.CLASS_COLORS
     if class and colors and colors[class] then
@@ -1009,18 +1311,24 @@ function Threat:RefreshFrame(f)
         UI:LayoutBars(f)
     end
 
-    local tankMode = TankingModeEnabled()
+    local mode = f.mode or "threat"
+    local view = EffectiveView(mode)
+    local tankMode = (view == "tank")
+    local overallMode = (view == "overall")
+
     if f.title then
         if tankMode then
-            f.title:SetText("Tank Mode")
+            f.title:SetText((UI.MODE_LABELS and UI.MODE_LABELS.tank) or "Tank")
+        elseif overallMode then
+            f.title:SetText((UI.MODE_LABELS and UI.MODE_LABELS.overall) or "Overall Threat")
         else
             f.title:SetText((UI.MODE_LABELS and UI.MODE_LABELS.threat) or "Threat")
         end
     end
 
-    local list = self:GetSortedList(f.hiddenNames)
+    local list = self:GetSortedList(f.hiddenNames, mode)
 
-    -- Optional total bar (player list only — not useful for enemy tank mode)
+    -- Optional total bar (player lists only — not for enemy tank mode)
     if not tankMode and OM.GetSetting and OM:GetSetting("showTotal") and table.getn(list) > 0 then
         local totalVal = 0
         local _, entry
@@ -1164,10 +1472,10 @@ function Threat:RefreshFrame(f)
             end
 
             bar.entry = entry
-            bar.mode = "threat"
+            bar.mode = mode
             bar.duration = 0
 
-            -- Tank mode: click a bar to target that enemy (taunt / switch assist).
+            -- Tank view: click a bar to target that enemy (taunt / switch assist).
             -- StatusBar is not a Button in 1.12, so OnClick is unavailable — use OnMouseUp.
             -- With SuperWoW, TargetUnit(guid) selects the exact mob even when names match.
             if isEnemy then
@@ -1201,11 +1509,11 @@ local function InstallUIHooks()
     if Threat._hooksInstalled then return end
     Threat._hooksInstalled = true
 
-    -- Own the refresh path for threat mode (see note above about Frames.lua locals)
+    -- Own the refresh path for threat modes (see note above about Frames.lua locals)
     if UI.RefreshFrame then
         local oldRefreshFrame = UI.RefreshFrame
         UI.RefreshFrame = function(self, f)
-            if f and f.mode == "threat" then
+            if f and IsThreatModeKey(f.mode) then
                 return Threat:RefreshFrame(f)
             end
             return oldRefreshFrame(self, f)
@@ -1216,7 +1524,7 @@ local function InstallUIHooks()
     local oldTooltip = UI.ShowBarTooltip
     if oldTooltip then
         UI.ShowBarTooltip = function(bar)
-            if bar and bar.mode == "threat" and bar.entry and bar.entry.data then
+            if bar and IsThreatModeKey(bar.mode) and bar.entry and bar.entry.data then
                 local d = bar.entry.data
                 GameTooltip:SetOwner(bar, "ANCHOR_RIGHT")
                 if d.isEnemy then
@@ -1231,6 +1539,23 @@ local function InstallUIHooks()
                         GameTooltip:AddLine("You do not have aggro", 1, 0.3, 0.3)
                     end
                     GameTooltip:AddLine("Click to target", 0.6, 0.6, 0.6)
+                elseif d.isOverall then
+                    GameTooltip:AddLine(bar.entry.name or "?", 1, 1, 1)
+                    GameTooltip:AddDoubleLine("Total threat", tostring(math.floor((d.threat or 0) + 0.5)), 0.8, 0.8, 0.8, 1, 1, 1)
+                    if d.perc and d.perc > 0 then
+                        GameTooltip:AddDoubleLine("% of max", tostring(d.perc) .. "%", 0.8, 0.8, 0.8, 1, 1, 1)
+                    end
+                    local count = d.targetedByCount or 0
+                    GameTooltip:AddDoubleLine("Enemies targeting", tostring(count), 0.8, 0.8, 0.8, 1, 0.85, 0.3)
+                    if d.targetedBy and table.getn(d.targetedBy) > 0 then
+                        GameTooltip:AddLine("Targeted by:", 0.7, 0.7, 0.7)
+                        local ti
+                        for ti = 1, table.getn(d.targetedBy) do
+                            GameTooltip:AddLine("  " .. d.targetedBy[ti], 1, 0.85, 0.4)
+                        end
+                    elseif count == 0 then
+                        GameTooltip:AddLine("No visible enemies targeting this player.", 0.5, 0.5, 0.5)
+                    end
                 elseif d.isPull then
                     GameTooltip:AddLine("Pull Aggro Threshold", 1, 0.4, 0.4)
                     GameTooltip:AddLine("Threat needed to pull from the current tank.", 0.7, 0.7, 0.7, 1)
@@ -1279,6 +1604,8 @@ end
 -- Mode list management
 -- ============================================================
 
+local THREAT_MODE_KEYS = { "threat", "tank", "overall" }
+
 local function EnsureModeInList(enabled)
     if not UI.MODE_ORDER or not UI.MODE_LABELS then return end
 
@@ -1286,27 +1613,78 @@ local function EnsureModeInList(enabled)
     -- UI/Frames.lua keeps a local reference (local MODE_ORDER = UI.MODE_ORDER)
     -- captured at load time. Replacing UI.MODE_ORDER with a new table would
     -- leave that local pointing at the old list and the Mode dropdown would
-    -- never show "Threat".
-    local i
+    -- never show our modes.
+    local i, k
     for i = table.getn(UI.MODE_ORDER), 1, -1 do
-        if UI.MODE_ORDER[i] == "threat" then
+        local key = UI.MODE_ORDER[i]
+        if key == "threat" or key == "tank" or key == "overall" then
             table.remove(UI.MODE_ORDER, i)
         end
     end
+    UI.MODE_LABELS.threat = nil
+    UI.MODE_LABELS.tank = nil
+    UI.MODE_LABELS.overall = nil
 
-    if enabled then
-        table.insert(UI.MODE_ORDER, "threat")
-        UI.MODE_LABELS.threat = "Threat"
-    else
-        UI.MODE_LABELS.threat = nil
+    if not enabled then
         if UI.frames then
             local _, f
             for _, f in ipairs(UI.frames) do
-                if f.mode == "threat" then
+                if IsThreatModeKey(f.mode) then
                     f.mode = "damage"
                     if f.title then f.title:SetText(UI.MODE_LABELS.damage or "Damage") end
                     if UI.RefreshFrame then UI:RefreshFrame(f) end
                 end
+            end
+        end
+        return
+    end
+
+    local view = GetThreatView()
+    if view == "all" then
+        table.insert(UI.MODE_ORDER, "threat")
+        table.insert(UI.MODE_ORDER, "tank")
+        table.insert(UI.MODE_ORDER, "overall")
+        UI.MODE_LABELS.threat  = "Threat"
+        UI.MODE_LABELS.tank    = "Tank"
+        UI.MODE_LABELS.overall = "Overall Threat"
+    elseif view == "tank" then
+        table.insert(UI.MODE_ORDER, "tank")
+        UI.MODE_LABELS.tank = "Tank"
+    elseif view == "overall" then
+        table.insert(UI.MODE_ORDER, "overall")
+        UI.MODE_LABELS.overall = "Overall Threat"
+    else
+        table.insert(UI.MODE_ORDER, "threat")
+        UI.MODE_LABELS.threat = "Threat"
+    end
+
+    -- If a frame is stuck on a mode that was removed, snap to a valid one
+    if UI.frames then
+        local valid = {}
+        if view == "all" then
+            valid.threat = true
+            valid.tank = true
+            valid.overall = true
+        elseif view == "tank" then
+            valid.tank = true
+        elseif view == "overall" then
+            valid.overall = true
+        else
+            valid.threat = true
+        end
+        local _, f
+        for _, f in ipairs(UI.frames) do
+            if IsThreatModeKey(f.mode) and not valid[f.mode] then
+                if valid.threat then
+                    f.mode = "threat"
+                elseif valid.tank then
+                    f.mode = "tank"
+                elseif valid.overall then
+                    f.mode = "overall"
+                else
+                    f.mode = "damage"
+                end
+                if UI.RefreshFrame then UI:RefreshFrame(f) end
             end
         end
     end
@@ -1333,6 +1711,23 @@ local function SyncChildEnabled(parentCb, childCb, parentKey)
     end
 end
 
+local THREAT_VIEW_OPTIONS = {
+    { key = "single",  label = "Single target" },
+    { key = "tank",    label = "Tank" },
+    { key = "overall", label = "Overall" },
+    { key = "all",     label = "All" },
+}
+
+local function ThreatViewLabel(key)
+    local i
+    for i = 1, table.getn(THREAT_VIEW_OPTIONS) do
+        if THREAT_VIEW_OPTIONS[i].key == key then
+            return THREAT_VIEW_OPTIONS[i].label
+        end
+    end
+    return "Single target"
+end
+
 local function AddThreatCheckboxToSettings(f)
     if not f or f._greedThreatCheckbox then return end
 
@@ -1343,12 +1738,14 @@ local function AddThreatCheckboxToSettings(f)
         return (a.order or 100) < (b.order or 100)
     end)
 
-    -- Count total rows so we can place parent above children (visual top→bottom).
-    -- BOTTOMLEFT: larger y offset = higher on screen.
+    -- Rows: parent checkbox + optional child dropdown (counts as 2 rows) + child checkboxes
     local totalRows = 0
     local i
     for i = 1, table.getn(extras) do
         totalRows = totalRows + 1
+        if extras[i].childDropdown then
+            totalRows = totalRows + 1 -- one combined label+dropdown row
+        end
         if extras[i].children then
             totalRows = totalRows + table.getn(extras[i].children)
         end
@@ -1356,13 +1753,17 @@ local function AddThreatCheckboxToSettings(f)
 
     local baseY = 40
     local rowH  = 22
-    -- Start at the top of our block and step downward
-    local y = baseY + (totalRows - 1) * rowH
+    local dropH = 32 -- UIDropDownMenu is taller than a checkbox row
+    -- Extra vertical space if any dropdown is present
+    local hasDrop = false
+    for i = 1, table.getn(extras) do
+        if extras[i].childDropdown then hasDrop = true break end
+    end
+    local y = baseY + (totalRows - 1) * rowH + (hasDrop and (dropH - rowH) or 0)
 
     for i = 1, table.getn(extras) do
         local entry = extras[i]
 
-        -- Parent checkbox (higher on screen than its children)
         local cb = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
         cb:SetWidth(24)
         cb:SetHeight(24)
@@ -1378,6 +1779,34 @@ local function AddThreatCheckboxToSettings(f)
         cb:SetChecked(cur and 1 or nil)
 
         local childCbs = {}
+        local childDrop = nil
+        local childDropBtn = nil
+
+        local function SyncDropdownEnabled()
+            if not childDrop then return end
+            local parentOn = OM:GetSetting(entry.key) == true
+            if parentOn then
+                if UIDropDownMenu_EnableDropDown then
+                    UIDropDownMenu_EnableDropDown(childDrop)
+                end
+                if childDropBtn then
+                    childDropBtn:Enable()
+                    childDropBtn:EnableMouse(true)
+                end
+                if childDrop.label then childDrop.label:SetTextColor(1, 1, 1) end
+            else
+                if UIDropDownMenu_DisableDropDown then
+                    UIDropDownMenu_DisableDropDown(childDrop)
+                end
+                if childDropBtn then
+                    childDropBtn:Disable()
+                    childDropBtn:EnableMouse(false)
+                end
+                -- Close any open list
+                if CloseDropDownMenus then CloseDropDownMenus() end
+                if childDrop.label then childDrop.label:SetTextColor(0.5, 0.5, 0.5) end
+            end
+        end
 
         cb:SetScript("OnClick", function()
             local checked = this:GetChecked() and true or false
@@ -1387,6 +1816,7 @@ local function AddThreatCheckboxToSettings(f)
             for _, c in ipairs(childCbs) do
                 SyncChildEnabled(this, c, entry.key)
             end
+            SyncDropdownEnabled()
             if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
         end)
 
@@ -1401,7 +1831,74 @@ local function AddThreatCheckboxToSettings(f)
 
         y = y - rowH
 
-        -- Children indented and placed underneath the parent
+        -- Child dropdown on one row: "Threat view:" label left, dropdown to its right
+        if entry.childDropdown then
+            local ddInfo = entry.childDropdown
+            local opts = ddInfo.options or THREAT_VIEW_OPTIONS
+
+            local lbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            lbl:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 40, y + 6)
+            lbl:SetText(ddInfo.label or "View:")
+
+            local ddName = "GreedMeterThreatViewDropDown"
+            local dd = CreateFrame("Frame", ddName, f, "UIDropDownMenuTemplate")
+            -- Sit to the right of the label so it never covers the text
+            dd:SetPoint("LEFT", lbl, "RIGHT", -8, -2)
+            dd.label = lbl
+            childDrop = dd
+            childDropBtn = getglobal(ddName .. "Button")
+
+            local function OnSelect()
+                if OM:GetSetting(entry.key) ~= true then return end
+                local id = this:GetID()
+                local opt = opts[id]
+                if not opt then return end
+                OM:SetSetting(ddInfo.key, opt.key)
+                UIDropDownMenu_SetSelectedID(dd, id)
+                UIDropDownMenu_SetText(opt.label, dd)
+                if ddInfo.onChange then ddInfo.onChange(opt.key) end
+            end
+
+            local function Init()
+                if OM:GetSetting(entry.key) ~= true then return end
+                local curKey = OM:GetSetting(ddInfo.key) or ddInfo.default or "single"
+                local oi
+                for oi = 1, table.getn(opts) do
+                    local info = {}
+                    info.text = opts[oi].label
+                    info.func = OnSelect
+                    info.checked = (opts[oi].key == curKey)
+                    UIDropDownMenu_AddButton(info)
+                end
+            end
+
+            UIDropDownMenu_Initialize(dd, Init)
+            UIDropDownMenu_SetWidth(110, dd)
+            UIDropDownMenu_SetButtonWidth(110, dd)
+            local curKey = OM:GetSetting(ddInfo.key) or ddInfo.default or "single"
+            UIDropDownMenu_SetText(ThreatViewLabel(curKey), dd)
+            local sel = 1
+            local oi
+            for oi = 1, table.getn(opts) do
+                if opts[oi].key == curKey then sel = oi break end
+            end
+            UIDropDownMenu_SetSelectedID(dd, sel)
+
+            if ddInfo.tooltip then
+                dd:SetScript("OnEnter", function()
+                    if OM:GetSetting(entry.key) ~= true then return end
+                    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(ddInfo.tooltip, nil, nil, nil, nil, 1)
+                    GameTooltip:Show()
+                end)
+                dd:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            end
+
+            SyncDropdownEnabled()
+            y = y - dropH
+        end
+
+        -- Optional child checkboxes (legacy)
         if entry.children then
             local ci
             for ci = 1, table.getn(entry.children) do
@@ -1662,6 +2159,28 @@ function Threat:LoadTestData()
             estimated = false,
         }
     end
+
+    -- Overall fight totals for Overall view / test
+    local oi
+    for oi = 1, table.getn(entries) do
+        local e = entries[oi]
+        local name = e[1]
+        local threat = math.floor((e[2] or 0) * 1.35) -- slightly higher than single-target snapshot
+        local class = nil
+        local ni
+        for ni = 1, table.getn(names) do
+            if names[ni] == name then
+                class = classes[((ni - 1) - math.floor((ni - 1) / 9) * 9) + 1]
+                break
+            end
+        end
+        Threat.overallThreat[name] = {
+            threat    = threat,
+            class     = class,
+            estimated = false,
+            tank      = (name == Threat.tankName),
+        }
+    end
 end
 
 function Threat:ClearTestData()
@@ -1726,7 +2245,14 @@ function Threat:OnLoad()
     end
     if OM.db then
         if OM.db.enableThreatMode == nil then OM.db.enableThreatMode = false end
-        if OM.db.enableTankingMode == nil then OM.db.enableTankingMode = false end
+        if OM.db.threatView == nil then
+            -- migrate legacy tank checkbox
+            if OM.db.enableTankingMode then
+                OM.db.threatView = "tank"
+            else
+                OM.db.threatView = "single"
+            end
+        end
     end
 
     InstallUIHooks()
@@ -1750,42 +2276,35 @@ function Threat:OnLoad()
         key     = "enableThreatMode",
         default = false,
         order   = 10,
-        tooltip = "Adds a Threat mode to meter windows.\nPlayer threat on the current target with Pull Aggro threshold and % of MT.\nUses the Turtle WoW threat API when available; otherwise estimates in a party/raid.\nWorks with Test mode for a combat-free preview.",
+        tooltip = "Enables threat metering on meter windows.\nUse the Threat view dropdown to choose Single target, Tank, Overall, or All (adds every view as its own Mode option).",
         onToggle = function(checked)
             EnsureModeInList(checked)
             if not checked then
-                OM:SetSetting("enableTankingMode", false)
                 Threat:ClearTestData()
             elseif OM:GetSetting("testMode") then
                 Threat:LoadTestData()
                 if UI and UI.Refresh then UI:Refresh() end
             end
             if checked then
-                DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Threat mode enabled. Select it from the Mode button on any meter window.")
+                DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Threat mode enabled. Pick a view and select it from Mode on a meter window.")
             else
                 DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Threat mode disabled.")
             end
         end,
-        children = {
-            {
-                label   = "Tank mode",
-                key     = "enableTankingMode",
-                default = false,
-                tooltip = "While Threat mode is active, switch the window to an enemy list:\n• All mobs you are in combat with\n• Ordered by your threat on them (lowest first)\n• Green = solid lead, Yellow = contested, Red = you do not have aggro\n• Click a bar to target that enemy\n• Uses Turtle multi-mob API when available",
-                onToggle = function(checked)
-                    if OM:GetSetting("testMode") and OM:GetSetting("enableThreatMode") then
-                        Threat:LoadTestData()
-                    end
-                    if checked then
-                        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Tank mode on — enemy list by your threat (click bar to target).")
-                    else
-                        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Tank mode off — back to player threat list.")
-                    end
-                    if Threat:AnyFrameInThreatMode() and UI.Refresh then
-                        UI:Refresh()
-                    end
-                end,
-            },
+        childDropdown = {
+            label   = "Threat view:",
+            key     = "threatView",
+            default = "single",
+            options = THREAT_VIEW_OPTIONS,
+            tooltip = "Single target — player threat on your current target (with Pull Aggro).\nTank — enemies you are fighting, lowest of your threat first; click to target.\nOverall — each player's total threat generated this fight (not target-specific).\nAll — adds Threat, Tank, and Overall Threat as separate Mode options.",
+            onChange = function(key)
+                EnsureModeInList(OM:GetSetting("enableThreatMode") == true)
+                if OM:GetSetting("testMode") and OM:GetSetting("enableThreatMode") then
+                    Threat:LoadTestData()
+                end
+                DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Threat view: " .. ThreatViewLabel(key))
+                if UI and UI.Refresh then UI:Refresh() end
+            end,
         },
     })
 
@@ -1803,6 +2322,10 @@ function Threat:OnCombatStart()
     if OM:GetSetting("testMode") then return end
     ClearThreatTable()
     ClearTankModeTable()
+    local k
+    for k in pairs(Threat.overallThreat) do
+        Threat.overallThreat[k] = nil
+    end
     Threat.usingApi = false
     Threat.estimateHistory = {}
     Threat.testDataActive = false
@@ -1819,6 +2342,10 @@ function Threat:OnReset()
     end
     ClearThreatTable()
     ClearTankModeTable()
+    local k
+    for k in pairs(Threat.overallThreat) do
+        Threat.overallThreat[k] = nil
+    end
     Threat.history = {}
     Threat.estimateHistory = {}
     Threat.usingApi = false

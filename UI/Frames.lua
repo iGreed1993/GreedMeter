@@ -94,6 +94,20 @@ local function StyleClickableHeaderBtn(btn)
     btn:SetHeight(16)
 end
 
+-- Shared header-button tooltip (title + optional subtitle).
+local function SetHeaderBtnTooltip(btn, title, subtitle)
+    if not btn then return end
+    btn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(btn, "ANCHOR_BOTTOM")
+        GameTooltip:SetText(title or "", 1, 1, 1)
+        if subtitle and subtitle ~= "" then
+            GameTooltip:AddLine(subtitle, 0.7, 0.7, 0.7)
+        end
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+end
+
 -- Size gray box to the text inside it
 local function FitHeaderBtn(btn, label)
     if not btn or not label then return end
@@ -391,15 +405,11 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
     f.resetBtn = resetBtn
     StyleClickableHeaderBtn(resetBtn)
     local function DoReset()
-        if OM.data then
-            OM.data.current = { players = {}, startTime = 0, endTime = 0, label = "Current", isBoss = false, duration = 0 }
-            OM.data.overall = { players = {}, startTime = 0, endTime = 0, label = "Overall", isBoss = false, duration = 0 }
-            OM.data.recentFights = {}
-            OM.data.bossFights = {}
+        if OM.ResetData then
+            OM:ResetData()
+        else
+            OM:Fire("OnReset")
         end
-        if OM.SetSetting then OM:SetSetting("testMode", false) end
-        if OM.UpdateGroupRoster then OM:UpdateGroupRoster() end
-        OM:Fire("OnReset")
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Data reset.")
     end
     resetBtn:SetScript("OnClick", function()
@@ -421,13 +431,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
             DoReset()
         end
     end)
-    resetBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(resetBtn, "ANCHOR_BOTTOM")
-        GameTooltip:SetText("Reset", 1, 1, 1)
-        GameTooltip:AddLine("Clear all recorded combat data", 0.7, 0.7, 0.7)
-        GameTooltip:Show()
-    end)
-    resetBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    SetHeaderBtnTooltip(resetBtn, "Reset", "Clear all recorded combat data")
 
     -- Right side: Segment on top, Mode below
     local segBtn = CreateFrame("Button", nil, f)
@@ -452,13 +456,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
             UI:SaveAllFrameLayouts()
         end)
     end)
-    segBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(segBtn, "ANCHOR_BOTTOM")
-        GameTooltip:SetText("Segment", 1, 1, 1)
-        GameTooltip:AddLine("Click to change segment", 0.7, 0.7, 0.7)
-        GameTooltip:Show()
-    end)
-    segBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    SetHeaderBtnTooltip(segBtn, "Segment", "Click to change segment")
     f.segBtn = segBtn
     StyleClickableHeaderBtn(segBtn)
 
@@ -487,13 +485,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
             UI:SaveAllFrameLayouts()
         end)
     end)
-    modeBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(modeBtn, "ANCHOR_BOTTOM")
-        GameTooltip:SetText("Mode", 1, 1, 1)
-        GameTooltip:AddLine("Click to change mode", 0.7, 0.7, 0.7)
-        GameTooltip:Show()
-    end)
-    modeBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    SetHeaderBtnTooltip(modeBtn, "Mode", "Click to change mode")
     f.modeBtn = modeBtn
     StyleClickableHeaderBtn(modeBtn)
 
@@ -512,13 +504,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
     nameBtn:SetScript("OnClick", function()
         UI:ShowNameFilterMenu(f, nameBtn)
     end)
-    nameBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(nameBtn, "ANCHOR_BOTTOM")
-        GameTooltip:SetText("Name filter", 1, 1, 1)
-        GameTooltip:AddLine("Click to show/hide players", 0.7, 0.7, 0.7)
-        GameTooltip:Show()
-    end)
-    nameBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    SetHeaderBtnTooltip(nameBtn, "Name filter", "Click to show/hide players")
     f.nameBtn = nameBtn
     StyleClickableHeaderBtn(nameBtn)
 
@@ -653,13 +639,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
             UI:AnnounceFrame(f)
         end
     end)
-    announceBtn:SetScript("OnEnter", function()
-        GameTooltip:SetOwner(announceBtn, "ANCHOR_BOTTOM")
-        GameTooltip:SetText("Announce", 1, 1, 1)
-        GameTooltip:AddLine("Report this window to chat", 0.7, 0.7, 0.7)
-        GameTooltip:Show()
-    end)
-    announceBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    SetHeaderBtnTooltip(announceBtn, "Announce", "Report this window to chat")
 
     -- Header-style + (primary) or - (extra windows)
     if isPrimary then
@@ -676,13 +656,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
         addBtn:SetScript("OnClick", function()
             UI:AddFrame(f)
         end)
-        addBtn:SetScript("OnEnter", function()
-            GameTooltip:SetOwner(addBtn, "ANCHOR_BOTTOM")
-            GameTooltip:SetText("Add window", 1, 1, 1)
-            GameTooltip:AddLine("Open another meter window", 0.7, 0.7, 0.7)
-            GameTooltip:Show()
-        end)
-        addBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        SetHeaderBtnTooltip(addBtn, "Add window", "Open another meter window")
     else
         local removeBtn = CreateFrame("Button", nil, f)
         removeBtn:SetWidth(22)
@@ -697,12 +671,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
         removeBtn:SetScript("OnClick", function()
             UI:RemoveFrame(f)
         end)
-        removeBtn:SetScript("OnEnter", function()
-            GameTooltip:SetOwner(removeBtn, "ANCHOR_BOTTOM")
-            GameTooltip:SetText("Remove window", 1, 1, 1)
-            GameTooltip:Show()
-        end)
-        removeBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        SetHeaderBtnTooltip(removeBtn, "Remove window")
     end
 
     local opacity = 1
