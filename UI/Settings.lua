@@ -169,7 +169,7 @@ function UI:CreateSettingsFrame()
 
     local f = CreateFrame("Frame", "GreedMeterSettings", UIParent)
     f:SetWidth(460)
-    f:SetHeight(540)
+    f:SetHeight(340)
     f:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
     f:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -204,16 +204,13 @@ function UI:CreateSettingsFrame()
         sw:SetTextColor(1, 0.8, 0.3)
     end
 
-    -- Left column: checkboxes
+    -- Left column: checkboxes (display/appearance options live in Customization)
     local y = -48
-    AddCheckbox(f, "Class colors", 16, y, "classColors", "Color bars by player class")
-    y = y - 24
     AddCheckbox(f, "Lock frame position", 16, y, "lockFrames", "Prevent dragging and resizing")
     y = y - 24
     local layoutCb = AddCheckbox(f, "Account-wide layout", 16, y, "accountWideLayout",
         "Share window size, position, and number of open windows across all characters on this account. Uncheck for per-character layouts.")
     layoutCb.onToggle = function(checked)
-        -- Copy current layout into the newly selected store so nothing is lost
         if UI.SaveAllFrameLayouts then
             UI:SaveAllFrameLayouts()
         end
@@ -229,27 +226,6 @@ function UI:CreateSettingsFrame()
     AddCheckbox(f, "Confirm before announce", 16, y, "confirmAnnounce", "Show a confirmation popup when pressing Announce")
     y = y - 24
     AddCheckbox(f, "Show total bar", 16, y, "showTotal", "Add a Total row summing all players")
-    y = y - 24
-    local compactCb = AddCheckbox(f, "Compact Header", 16, y, "hideTitle",
-        "One-line header with abbreviated button labels (Re, An, Na, Mo, ...)")
-    y = y - 22
-    local keepTitleCb = AddCheckbox(f, "Keep Title in compact", 36, y, "keepTitleInCompact",
-        "Show the mode title above the compact one-line controls. Mode button stays labeled Mode.", 18)
-    f.keepTitleCb = keepTitleCb
-    local function SyncKeepTitleEnabled()
-        local parentOn = OM:GetSetting("hideTitle") == true
-        if parentOn then
-            keepTitleCb:Enable()
-            if keepTitleCb.label then keepTitleCb.label:SetTextColor(1, 1, 1) end
-        else
-            keepTitleCb:Disable()
-            if keepTitleCb.label then keepTitleCb.label:SetTextColor(0.5, 0.5, 0.5) end
-        end
-    end
-    compactCb.onToggle = function(checked)
-        SyncKeepTitleEnabled()
-    end
-    SyncKeepTitleEnabled()
     y = y - 24
     local testCb = AddCheckbox(f, "Test mode", 16, y, "testMode",
         "Fill the meter with fake 40-player raid data. Uncheck to clear it.")
@@ -271,65 +247,14 @@ function UI:CreateSettingsFrame()
         end
     end
     y = y - 24
-    AddCheckbox(f, "Show class icons", 16, y, "showClassIcons",
-        "Show a class icon before each player name on the meter bars")
-    y = y - 24
-    AddCheckbox(f, "Mode Colors", 16, y, "buttonsColorWithMode",
-        "Change all buttons and Total bar to unique mode colors")
-    y = y - 24
     AddCheckbox(f, "Merge pet damage", 16, y, "mergePetDamage",
         "Combine all pet ability damage into a single \"Pet: Damage\" entry on tooltips")
     y = y - 28
 
-    -- Right column: dropdowns (top-aligned with checkboxes)
+    -- Right column: combat log range first, then announce channel + lines together
     local rightX = 250
     local ry = -48
 
-    local annLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    annLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
-    annLabel:SetText("Announce channel:")
-    ry = ry - 18
-
-    local CHANNELS = { "AUTO", "SAY", "PARTY", "RAID" }
-
-    local function ChannelDropDown_OnClick()
-        local id = this:GetID()
-        local ch = CHANNELS[id]
-        if not ch then return end
-        OM:SetSetting("announceChannel", ch)
-        UIDropDownMenu_SetSelectedID(f.channelDropDown, id)
-        UIDropDownMenu_SetText(ch, f.channelDropDown)
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Announce channel: " .. ch)
-    end
-
-    local function ChannelDropDown_Init()
-        local cur = OM:GetSetting("announceChannel") or "AUTO"
-        local i
-        for i = 1, table.getn(CHANNELS) do
-            local info = {}
-            info.text = CHANNELS[i]
-            info.func = ChannelDropDown_OnClick
-            info.checked = (CHANNELS[i] == cur)
-            UIDropDownMenu_AddButton(info)
-        end
-    end
-
-    local dd = CreateFrame("Frame", "GreedMeterChannelDropDown", f, "UIDropDownMenuTemplate")
-    dd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
-    UIDropDownMenu_Initialize(dd, ChannelDropDown_Init)
-    UIDropDownMenu_SetWidth(120, dd)
-    UIDropDownMenu_SetButtonWidth(120, dd)
-    local cur = OM:GetSetting("announceChannel") or "AUTO"
-    UIDropDownMenu_SetText(cur, dd)
-    local sel = 1
-    local i
-    for i = 1, table.getn(CHANNELS) do
-        if CHANNELS[i] == cur then sel = i break end
-    end
-    UIDropDownMenu_SetSelectedID(dd, sel)
-    f.channelDropDown = dd
-
-    ry = ry - 36
     local rangeLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     rangeLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
     rangeLabel:SetText("Combat log range:")
@@ -377,185 +302,76 @@ function UI:CreateSettingsFrame()
     UIDropDownMenu_SetSelectedID(rdd, rsel)
     f.rangeDropDown = rdd
 
-    -- Bar style
-    ry = ry - 36
-    local styleLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    styleLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
-    styleLabel:SetText("Bar style:")
-    ry = ry - 18
-
-    local BAR_STYLES = UI.BAR_STYLES or {
-        { key = "Default", label = "Default" },
-        { key = "Smooth",  label = "Smooth" },
-        { key = "Flat",    label = "Flat" },
-    }
-
-    local function StyleDropDown_OnClick()
-        local id = this:GetID()
-        local entry = BAR_STYLES[id]
-        if not entry then return end
-        OM:SetSetting("barStyle", entry.key)
-        UIDropDownMenu_SetSelectedID(f.styleDropDown, id)
-        UIDropDownMenu_SetText(entry.label, f.styleDropDown)
-        if UI.ApplySettingsToFrames then
-            UI:ApplySettingsToFrames()
-        end
-    end
-
-    local function StyleDropDown_Init()
-        local cur = OM:GetSetting("barStyle") or "Default"
-        local i
-        for i = 1, table.getn(BAR_STYLES) do
-            local info = {}
-            info.text = BAR_STYLES[i].label
-            info.func = StyleDropDown_OnClick
-            info.checked = (BAR_STYLES[i].key == cur)
-            UIDropDownMenu_AddButton(info)
-        end
-    end
-
-    local sdd = CreateFrame("Frame", "GreedMeterStyleDropDown", f, "UIDropDownMenuTemplate")
-    sdd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
-    UIDropDownMenu_Initialize(sdd, StyleDropDown_Init)
-    UIDropDownMenu_SetWidth(120, sdd)
-    UIDropDownMenu_SetButtonWidth(120, sdd)
-    local scur = OM:GetSetting("barStyle") or "Default"
-    local ssel = 1
-    local si
-    for si = 1, table.getn(BAR_STYLES) do
-        if BAR_STYLES[si].key == scur then
-            ssel = si
-            UIDropDownMenu_SetText(BAR_STYLES[si].label, sdd)
-            break
-        end
-    end
-    UIDropDownMenu_SetSelectedID(sdd, ssel)
-    f.styleDropDown = sdd
-
-    -- Bar font
-    ry = ry - 36
-    local fontLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    fontLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
-    fontLabel:SetText("Bar font:")
-    ry = ry - 18
-
-    local BAR_FONTS = UI.BAR_FONTS or {
-        { key = "Friz",     label = "Friz Quadrata" },
-        { key = "Arial",    label = "Arial Narrow" },
-        { key = "Morpheus", label = "Morpheus" },
-        { key = "Skurri",   label = "Skurri" },
-    }
-
-    local function FontDropDown_OnClick()
-        local id = this:GetID()
-        local entry = BAR_FONTS[id]
-        if not entry then return end
-        OM:SetSetting("barFont", entry.key)
-        UIDropDownMenu_SetSelectedID(f.fontDropDown, id)
-        UIDropDownMenu_SetText(entry.label, f.fontDropDown)
-        if UI.ApplySettingsToFrames then
-            UI:ApplySettingsToFrames()
-        end
-    end
-
-    local function FontDropDown_Init()
-        local cur = OM:GetSetting("barFont") or "Friz"
-        local i
-        for i = 1, table.getn(BAR_FONTS) do
-            local info = {}
-            info.text = BAR_FONTS[i].label
-            info.func = FontDropDown_OnClick
-            info.checked = (BAR_FONTS[i].key == cur)
-            UIDropDownMenu_AddButton(info)
-        end
-    end
-
-    local fdd = CreateFrame("Frame", "GreedMeterFontDropDown", f, "UIDropDownMenuTemplate")
-    fdd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
-    UIDropDownMenu_Initialize(fdd, FontDropDown_Init)
-    UIDropDownMenu_SetWidth(120, fdd)
-    UIDropDownMenu_SetButtonWidth(120, fdd)
-    local fcur = OM:GetSetting("barFont") or "Friz"
-    local fsel = 1
-    local fi
-    for fi = 1, table.getn(BAR_FONTS) do
-        if BAR_FONTS[fi].key == fcur then
-            fsel = fi
-            UIDropDownMenu_SetText(BAR_FONTS[fi].label, fdd)
-            break
-        end
-    end
-    UIDropDownMenu_SetSelectedID(fdd, fsel)
-    f.fontDropDown = fdd
-
-    -- Number format
-    ry = ry - 36
-    local numLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    numLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
-    numLabel:SetText("Number format:")
-    ry = ry - 18
-
-    local NUM_FORMATS = {
-        { key = "1k",    label = "1k" },
-        { key = "10k",   label = "10k" },
-        { key = "100k",  label = "100k" },
-        { key = "never", label = "Never" },
-    }
-
-    local function NumFormatDropDown_OnClick()
-        local id = this:GetID()
-        local entry = NUM_FORMATS[id]
-        if not entry then return end
-        OM:SetSetting("numberFormat", entry.key)
-        UIDropDownMenu_SetSelectedID(f.numFormatDropDown, id)
-        UIDropDownMenu_SetText(entry.label, f.numFormatDropDown)
-        if UI.ApplySettingsToFrames then
-            UI:ApplySettingsToFrames()
-        end
-        if UI.Refresh then
-            UI:Refresh()
-        end
-    end
-
-    local function NumFormatDropDown_Init()
-        local cur = OM:GetSetting("numberFormat") or "100k"
-        local i
-        for i = 1, table.getn(NUM_FORMATS) do
-            local info = {}
-            info.text = NUM_FORMATS[i].label
-            info.func = NumFormatDropDown_OnClick
-            info.checked = (NUM_FORMATS[i].key == cur)
-            UIDropDownMenu_AddButton(info)
-        end
-    end
-
-    local ndd = CreateFrame("Frame", "GreedMeterNumFormatDropDown", f, "UIDropDownMenuTemplate")
-    ndd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
-    UIDropDownMenu_Initialize(ndd, NumFormatDropDown_Init)
-    UIDropDownMenu_SetWidth(120, ndd)
-    UIDropDownMenu_SetButtonWidth(120, ndd)
-    local ncur = OM:GetSetting("numberFormat") or "100k"
-    local nsel = 3
-    local ni
-    for ni = 1, table.getn(NUM_FORMATS) do
-        if NUM_FORMATS[ni].key == ncur then
-            nsel = ni
-            UIDropDownMenu_SetText(NUM_FORMATS[ni].label, ndd)
-            break
-        end
-    end
-    UIDropDownMenu_SetSelectedID(ndd, nsel)
-    f.numFormatDropDown = ndd
-
-    -- Sliders under the dropdowns (right column)
+    -- Leave room under the dropdown button (UIDropDownMenu is tall)
     ry = ry - 42
-    AddSlider(f, "Bar height", rightX, ry, "barHeight", 10, 28, 1, 160)
-    ry = ry - 34
-    AddSlider(f, "Font size", rightX, ry, "fontSize", 8, 18, 1, 160)
-    ry = ry - 34
-    AddSlider(f, "Frame opacity", rightX, ry, "frameOpacity", 30, 100, 5, 160)
-    ry = ry - 34
+
+    local annLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    annLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
+    annLabel:SetText("Announce channel:")
+    ry = ry - 18
+
+    local CHANNELS = { "AUTO", "SAY", "PARTY", "RAID" }
+
+    local function ChannelDropDown_OnClick()
+        local id = this:GetID()
+        local ch = CHANNELS[id]
+        if not ch then return end
+        OM:SetSetting("announceChannel", ch)
+        UIDropDownMenu_SetSelectedID(f.channelDropDown, id)
+        UIDropDownMenu_SetText(ch, f.channelDropDown)
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Announce channel: " .. ch)
+    end
+
+    local function ChannelDropDown_Init()
+        local cur = OM:GetSetting("announceChannel") or "AUTO"
+        local i
+        for i = 1, table.getn(CHANNELS) do
+            local info = {}
+            info.text = CHANNELS[i]
+            info.func = ChannelDropDown_OnClick
+            info.checked = (CHANNELS[i] == cur)
+            UIDropDownMenu_AddButton(info)
+        end
+    end
+
+    local dd = CreateFrame("Frame", "GreedMeterChannelDropDown", f, "UIDropDownMenuTemplate")
+    dd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
+    UIDropDownMenu_Initialize(dd, ChannelDropDown_Init)
+    UIDropDownMenu_SetWidth(120, dd)
+    UIDropDownMenu_SetButtonWidth(120, dd)
+    local cur = OM:GetSetting("announceChannel") or "AUTO"
+    UIDropDownMenu_SetText(cur, dd)
+    local sel = 1
+    local i
+    for i = 1, table.getn(CHANNELS) do
+        if CHANNELS[i] == cur then sel = i break end
+    end
+    UIDropDownMenu_SetSelectedID(dd, sel)
+    f.channelDropDown = dd
+
+    -- Extra gap so the slider sits clearly below the channel dropdown
+    ry = ry - 44
     AddSlider(f, "Announce lines", rightX, ry, "announceLines", 1, 20, 1, 160)
+
+    -- Bottom buttons: Customization (left) + Close (right)
+    -- Reserve ~36px at the bottom for these; Threat extras sit above.
+    local cust = CreateButton(f, "Customization", 110, 20, function()
+        local fn = nil
+        if GreedMeter and GreedMeter.UI then
+            fn = GreedMeter.UI.ToggleCustomization or GreedMeter.UI.ToggleAdvanced
+        end
+        if not fn then
+            fn = UI.ToggleCustomization or UI.ToggleAdvanced
+        end
+        if fn then
+            fn(GreedMeter.UI or UI)
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff5555GreedMeter:|r Customization handler missing.")
+        end
+    end)
+    cust:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
+    f.customizationBtn = cust
+    f._greedCustomizationBtn = true
 
     local close = CreateButton(f, "Close", 70, 20, function()
         f:Hide()
@@ -876,5 +692,956 @@ end
 -- ============================================================
 -- Register
 -- ============================================================
+
+-- ============================================================
+-- Customization (merged into Settings so it always loads)
+-- ============================================================
+
+local MODE_COLUMN_OPTIONS = {
+    {
+        mode = "damage",
+        label = "Damage",
+        columns = {
+            { key = "amount", label = "Damage" },
+            { key = "share",  label = "Share %" },
+            { key = "rate",   label = "DPS" },
+        },
+    },
+    {
+        mode = "healing",
+        label = "Healing",
+        columns = {
+            { key = "amount", label = "Healing" },
+            { key = "share",  label = "Share %" },
+            { key = "rate",   label = "HPS" },
+        },
+    },
+    {
+        mode = "taken",
+        label = "Dmg Taken",
+        columns = {
+            { key = "amount", label = "Taken" },
+            { key = "share",  label = "Share %" },
+        },
+    },
+    {
+        mode = "interrupts",
+        label = "Interrupts",
+        columns = nil,
+    },
+    {
+        mode = "dispels",
+        label = "Dispels",
+        columns = nil,
+    },
+    {
+        mode = "cc",
+        label = "CC",
+        columns = {
+            { key = "amount",   label = "Count" },
+            { key = "duration", label = "Duration" },
+        },
+    },
+    {
+        mode = "ccbreak",
+        label = "CC Breaks",
+        columns = nil,
+    },
+    {
+        mode = "deaths",
+        label = "Deaths",
+        columns = nil,
+    },
+    {
+        mode = "threat",
+        label = "Threat",
+        columns = {
+            { key = "amount", label = "Threat" },
+            { key = "share",  label = "Share %" },
+            { key = "rate",   label = "TPS" },
+        },
+        threatOnly = true,
+    },
+    {
+        mode = "tank",
+        label = "Tank",
+        columns = nil,
+        threatOnly = true,
+    },
+    {
+        mode = "overall",
+        label = "Overall Threat",
+        columns = {
+            { key = "amount", label = "Threat" },
+            { key = "share",  label = "Share %" },
+            { key = "rate",   label = "TPS" },
+        },
+        threatOnly = true,
+    },
+}
+
+-- ============================================================
+-- Defaults / storage
+-- ============================================================
+
+local function CopyColor(c)
+    if not c then return { 0.6, 0.6, 0.6 } end
+    return { c[1] or 0.6, c[2] or 0.6, c[3] or 0.6 }
+end
+
+local function EnsureDefaults()
+    OM.defaults = OM.defaults or {}
+
+    if OM.defaults.abbreviateNames == nil then
+        OM.defaults.abbreviateNames = false
+    end
+
+    if OM.defaults.modeEnabled == nil then
+        local src = UI.MODE_ENABLED_DEFAULTS or {}
+        local copy = {}
+        local mode, v
+        for mode, v in pairs(src) do
+            copy[mode] = v and true or false
+        end
+        OM.defaults.modeEnabled = copy
+    end
+
+    if OM.defaults.columnConfig == nil then
+        local src = UI.COLUMN_DEFAULTS or {}
+        local copy = {}
+        local mode, cols
+        for mode, cols in pairs(src) do
+            copy[mode] = {}
+            local k, v
+            for k, v in pairs(cols) do
+                copy[mode][k] = v
+            end
+        end
+        OM.defaults.columnConfig = copy
+    end
+
+    if OM.defaults.modeColors == nil then
+        local src = UI.MODE_COLOR_DEFAULTS or {}
+        local copy = {}
+        local mode, col
+        for mode, col in pairs(src) do
+            copy[mode] = CopyColor(col)
+        end
+        OM.defaults.modeColors = copy
+    end
+end
+
+local function GetColumnConfig()
+    EnsureDefaults()
+    local cfg = OM:GetSetting("columnConfig")
+    if type(cfg) ~= "table" then
+        cfg = {}
+        OM:SetSetting("columnConfig", cfg)
+    end
+    return cfg
+end
+
+local function SetColumnValue(mode, key, value)
+    local cfg = GetColumnConfig()
+    if not cfg[mode] then
+        cfg[mode] = {}
+    end
+    cfg[mode][key] = value and true or false
+    OM:SetSetting("columnConfig", cfg)
+end
+
+local function GetModeEnabledTable()
+    EnsureDefaults()
+    local t = OM:GetSetting("modeEnabled")
+    if type(t) ~= "table" then
+        t = {}
+        local src = UI.MODE_ENABLED_DEFAULTS or {}
+        local mode, v
+        for mode, v in pairs(src) do
+            t[mode] = v and true or false
+        end
+        OM:SetSetting("modeEnabled", t)
+    end
+    return t
+end
+
+local function SetModeEnabled(mode, value)
+    local t = GetModeEnabledTable()
+    if not value then
+        local anyOther = false
+        local k, v
+        for k, v in pairs(t) do
+            if k ~= mode and v then
+                anyOther = true
+                break
+            end
+        end
+        if not anyOther then
+            local src = UI.MODE_ENABLED_DEFAULTS or {}
+            for k, v in pairs(src) do
+                if k ~= mode then
+                    local cur = t[k]
+                    if cur == nil then cur = v end
+                    if cur then
+                        anyOther = true
+                        break
+                    end
+                end
+            end
+        end
+        if not anyOther then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r At least one mode must stay enabled.")
+            return false
+        end
+    end
+    t[mode] = value and true or false
+    OM:SetSetting("modeEnabled", t)
+    return true
+end
+
+local function ApplyModeEnabledToFrames()
+    if not UI.frames then return end
+    local _, f
+    for _, f in ipairs(UI.frames) do
+        if f.mode and UI.IsModeEnabled and not UI.IsModeEnabled(f.mode) then
+            local nextMode = (UI.FirstEnabledMode and UI.FirstEnabledMode()) or "damage"
+            f.mode = nextMode
+            if f.title and UI.MODE_LABELS then
+                f.title:SetText(UI.MODE_LABELS[nextMode] or nextMode)
+            end
+        end
+        if UI.RefreshFrame then
+            UI:RefreshFrame(f)
+        end
+    end
+    if UI.SaveAllFrameLayouts then
+        UI:SaveAllFrameLayouts()
+    end
+end
+
+local function GetModeColorsTable()
+    EnsureDefaults()
+    local t = OM:GetSetting("modeColors")
+    if type(t) ~= "table" then
+        t = {}
+        local src = UI.MODE_COLOR_DEFAULTS or {}
+        local mode, col
+        for mode, col in pairs(src) do
+            t[mode] = CopyColor(col)
+        end
+        OM:SetSetting("modeColors", t)
+    end
+    return t
+end
+
+local function SetModeColor(mode, r, g, b)
+    local t = GetModeColorsTable()
+    t[mode] = { r, g, b }
+    OM:SetSetting("modeColors", t)
+end
+
+-- ============================================================
+-- Shared UI helpers
+-- ============================================================
+
+local function MakeCheckbox(parent, label, x, y, checked, onToggle, size, tooltip)
+    size = size or 20
+    local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+    cb:SetWidth(size)
+    cb:SetHeight(size)
+    cb:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    cb:SetChecked(checked and 1 or nil)
+    local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("LEFT", cb, "RIGHT", 1, 0)
+    fs:SetText(label)
+    cb.label = fs
+    cb:SetScript("OnClick", function()
+        local isChecked = this:GetChecked() and true or false
+        if onToggle then onToggle(isChecked) end
+    end)
+    if tooltip then
+        cb:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+            GameTooltip:SetText(tooltip, nil, nil, nil, nil, 1)
+            GameTooltip:Show()
+        end)
+        cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+    return cb
+end
+
+local function MakeSettingCheckbox(parent, label, x, y, settingKey, tooltip, size)
+    -- Declare first so the OnClick closure captures the local, not a global
+    local cb
+    cb = MakeCheckbox(parent, label, x, y, OM:GetSetting(settingKey) == true, function(checked)
+        OM:SetSetting(settingKey, checked)
+        if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+        if cb.onToggle then cb.onToggle(checked) end
+    end, size or 22, tooltip)
+    return cb
+end
+
+local function MakeSlider(parent, label, x, y, settingKey, minV, maxV, step, width)
+    local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    fs:SetText(label)
+
+    local slider = CreateFrame("Slider", nil, parent)
+    slider:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y - 14)
+    slider:SetWidth(width or 140)
+    slider:SetHeight(16)
+    slider:SetOrientation("HORIZONTAL")
+    slider:SetMinMaxValues(minV, maxV)
+    slider:SetValueStep(step or 1)
+    slider:SetValue(OM:GetSetting(settingKey) or minV)
+
+    local bg = slider:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints(slider)
+    bg:SetTexture(0.2, 0.2, 0.2, 0.8)
+
+    local thumb = slider:CreateTexture(nil, "OVERLAY")
+    thumb:SetTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+    thumb:SetWidth(32)
+    thumb:SetHeight(32)
+    slider:SetThumbTexture(thumb)
+
+    local valText = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    valText:SetPoint("LEFT", slider, "RIGHT", 6, 0)
+    valText:SetText(tostring(math.floor((OM:GetSetting(settingKey) or minV) + 0.5)))
+
+    slider:SetScript("OnValueChanged", function()
+        local v = this:GetValue()
+        if step and step >= 1 then
+            v = math.floor(v / step + 0.5) * step
+        end
+        OM:SetSetting(settingKey, v)
+        valText:SetText(tostring(math.floor(v + 0.5)))
+        if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+    end)
+    return slider
+end
+
+local function MakeDivider(parent, y, width)
+    local line = parent:CreateTexture(nil, "ARTWORK")
+    line:SetTexture(0.45, 0.45, 0.40, 0.7)
+    line:SetPoint("TOPLEFT", parent, "TOPLEFT", 4, y)
+    line:SetWidth(width or 680)
+    line:SetHeight(1)
+    return line
+end
+
+local function MakeColorSwatch(parent, width, height)
+    local f = CreateFrame("Button", nil, parent)
+    f:SetWidth(width or 18)
+    f:SetHeight(height or 14)
+    f:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    f:SetBackdropBorderColor(0.35, 0.35, 0.35, 1)
+    local fill = f:CreateTexture(nil, "BACKGROUND")
+    fill:SetPoint("TOPLEFT", f, "TOPLEFT", 2, -2)
+    fill:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -2, 2)
+    f.fill = fill
+    f.SetColor = function(self, r, g, b)
+        self._r, self._g, self._b = r, g, b
+        self.fill:SetTexture(r or 0.5, g or 0.5, b or 0.5, 1)
+        self:SetBackdropColor(0, 0, 0, 0.4)
+    end
+    f:SetColor(0.5, 0.5, 0.5)
+    return f
+end
+
+-- ============================================================
+-- Color palette popup
+-- ============================================================
+
+local paletteFrame = nil
+local paletteBlocker = nil
+local paletteTargetMode = nil
+local paletteOnPick = nil
+
+local function HidePalette()
+    if paletteFrame then paletteFrame:Hide() end
+    if paletteBlocker then paletteBlocker:Hide() end
+    paletteTargetMode = nil
+    paletteOnPick = nil
+end
+
+local function ShowPalette(anchor, mode, onPick)
+    local parent = UI.customizationFrame or UIParent
+    local base = 50
+    if parent.GetFrameLevel then
+        base = parent:GetFrameLevel() or 50
+    end
+
+    if not paletteFrame then
+        -- Click-away covers only the customization window (not the whole UI)
+        local blocker = CreateFrame("Button", "GreedMeterColorPaletteBlocker", parent)
+        blocker:SetAllPoints(parent)
+        blocker:SetFrameLevel(base + 40)
+        blocker:EnableMouse(true)
+        blocker:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        blocker:SetScript("OnClick", function()
+            HidePalette()
+        end)
+        blocker:Hide()
+        paletteBlocker = blocker
+
+        local pf = CreateFrame("Frame", "GreedMeterColorPalette", parent)
+        -- Level BEFORE backdrop/children so swatches stay clickable on 1.12
+        pf:SetFrameLevel(base + 50)
+        pf:SetWidth(148)
+        pf:SetHeight(92)
+        pf:SetBackdrop({
+            bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 12,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        })
+        pf:SetBackdropColor(0.08, 0.08, 0.08, 0.96)
+        pf:SetBackdropBorderColor(0.5, 0.5, 0.5, 1)
+        pf:EnableMouse(true)
+        pf:SetClampedToScreen(true)
+
+        local title = pf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        title:SetPoint("TOP", pf, "TOP", 0, -6)
+        title:SetText("Mode Color")
+
+        -- Sub-frame above the palette backdrop for the actual color buttons
+        local holder = CreateFrame("Frame", nil, pf)
+        holder:SetFrameLevel(pf:GetFrameLevel() + 5)
+        holder:EnableMouse(false)
+        holder:SetAllPoints(pf)
+        pf.holder = holder
+
+        pf.swatches = {}
+        local palette = UI.MODE_COLOR_PALETTE or {}
+        local i
+        local x, y = 10, -24
+        for i = 1, table.getn(palette) do
+            local c = palette[i]
+            local sw = MakeColorSwatch(holder, 22, 16)
+            sw:SetFrameLevel(holder:GetFrameLevel() + 1)
+            sw:SetPoint("TOPLEFT", holder, "TOPLEFT", x, y)
+            sw:SetColor(c[1], c[2], c[3])
+            sw:SetScript("OnClick", function()
+                if paletteTargetMode and paletteOnPick then
+                    paletteOnPick(this._r, this._g, this._b)
+                end
+                HidePalette()
+            end)
+            table.insert(pf.swatches, sw)
+            x = x + 26
+            if x > 130 then
+                x = 10
+                y = y - 20
+            end
+        end
+
+        pf:SetScript("OnHide", function()
+            if paletteBlocker then paletteBlocker:Hide() end
+            paletteTargetMode = nil
+            paletteOnPick = nil
+        end)
+
+        paletteFrame = pf
+    end
+
+    paletteTargetMode = mode
+    paletteOnPick = onPick
+    paletteFrame:ClearAllPoints()
+    paletteFrame:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+
+    -- Show only — do not re-SetFrameLevel (that puts the backdrop above swatches)
+    if paletteBlocker then
+        paletteBlocker:Show()
+    end
+    paletteFrame:Show()
+end
+
+-- ============================================================
+-- Dropdown helper (named frames required for UIDropDownMenu)
+-- ============================================================
+
+local dropSeq = 0
+local function MakeLabeledDropDown(parent, label, x, y, width, options, settingKey, onChange)
+    dropSeq = dropSeq + 1
+    local name = "GreedMeterCustDD" .. dropSeq
+
+    local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    fs:SetText(label)
+
+    local dd = CreateFrame("Frame", name, parent, "UIDropDownMenuTemplate")
+    dd:SetPoint("TOPLEFT", parent, "TOPLEFT", x - 16, y - 14)
+    UIDropDownMenu_SetWidth(width or 110, dd)
+    UIDropDownMenu_SetButtonWidth(width or 110, dd)
+
+    local function OnClick()
+        local id = this:GetID()
+        local entry = options[id]
+        if not entry then return end
+        OM:SetSetting(settingKey, entry.key)
+        UIDropDownMenu_SetSelectedID(dd, id)
+        UIDropDownMenu_SetText(entry.label, dd)
+        if onChange then onChange(entry) end
+        if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+        if UI.Refresh then UI:Refresh() end
+    end
+
+    local function Init()
+        local cur = OM:GetSetting(settingKey)
+        local i
+        for i = 1, table.getn(options) do
+            local info = {}
+            info.text = options[i].label
+            info.func = OnClick
+            info.checked = (options[i].key == cur)
+            UIDropDownMenu_AddButton(info)
+        end
+    end
+
+    UIDropDownMenu_Initialize(dd, Init)
+    local cur = OM:GetSetting(settingKey)
+    local sel = 1
+    local i
+    for i = 1, table.getn(options) do
+        if options[i].key == cur then
+            sel = i
+            UIDropDownMenu_SetText(options[i].label, dd)
+            break
+        end
+    end
+    UIDropDownMenu_SetSelectedID(dd, sel)
+    return dd
+end
+
+-- ============================================================
+-- Customization window
+-- ============================================================
+
+local function CreateCustomizationFrame()
+    if UI.customizationFrame then return UI.customizationFrame end
+
+    local f = CreateFrame("Frame", "GreedMeterCustomization", UIParent)
+    f:SetWidth(720)
+    f:SetHeight(560)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+    -- Strata/level BEFORE children so widgets stay above the backdrop
+    f:SetFrameStrata("DIALOG")
+    f:SetFrameLevel(50)
+    f:SetClampedToScreen(true)
+    f:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    f:SetBackdropColor(0, 0, 0, 0.94)
+    f:SetBackdropBorderColor(0.55, 0.55, 0.45, 1)
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function() this:StartMoving() end)
+    f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+
+    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    title:SetPoint("TOP", f, "TOP", 0, -10)
+    title:SetText("Customization")
+
+    -- Content sits above the parent backdrop (critical on 1.12)
+    local content = CreateFrame("Frame", nil, f)
+    content:SetFrameLevel(f:GetFrameLevel() + 10)
+    content:EnableMouse(false)
+    content:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -32)
+    content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 40)
+    f.content = content
+
+    local y = 0
+    local contentW = 690
+
+    -- ========== Global display options ==========
+    local sec = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    sec:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y)
+    sec:SetText("Display")
+    sec:SetTextColor(1, 0.85, 0.4)
+    y = y - 18
+
+    local abvCb = MakeCheckbox(content, "Abbreviated Names", 4, y,
+        OM:GetSetting("abbreviateNames") == true,
+        function(checked)
+            OM:SetSetting("abbreviateNames", checked)
+            if UI.Refresh then UI:Refresh() end
+        end, 22,
+        "Single-word: first 4 letters. Multi-word: first 3 of each word. Applies to all modes.")
+    f.abvCb = abvCb
+    y = y - 22
+
+    MakeSettingCheckbox(content, "Class colors", 4, y, "classColors", "Color bars by player class")
+    MakeSettingCheckbox(content, "Mode Colors", 150, y, "buttonsColorWithMode",
+        "Tint header buttons and Total bar with each mode's color")
+    MakeSettingCheckbox(content, "Class icons", 300, y, "showClassIcons",
+        "Show a class icon before each player name on the bars")
+    y = y - 22
+
+    local compactCb = MakeSettingCheckbox(content, "Compact Header", 4, y, "hideTitle",
+        "One-line header with abbreviated button labels (Re, An, Na, Mo, ...)")
+    y = y - 20
+    local keepTitleCb = MakeSettingCheckbox(content, "Keep Title in compact", 24, y, "keepTitleInCompact",
+        "Show the mode title above the compact one-line controls.", 18)
+    f.keepTitleCb = keepTitleCb
+    local function SyncKeepTitleEnabled()
+        local parentOn = OM:GetSetting("hideTitle") == true
+        if parentOn then
+            keepTitleCb:Enable()
+            if keepTitleCb.label then keepTitleCb.label:SetTextColor(1, 1, 1) end
+        else
+            keepTitleCb:Disable()
+            if keepTitleCb.label then keepTitleCb.label:SetTextColor(0.5, 0.5, 0.5) end
+        end
+    end
+    compactCb.onToggle = function()
+        SyncKeepTitleEnabled()
+    end
+    SyncKeepTitleEnabled()
+    y = y - 24
+
+    MakeDivider(content, y, contentW)
+    y = y - 10
+
+    -- ========== Appearance ==========
+    sec = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    sec:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y)
+    sec:SetText("Appearance")
+    sec:SetTextColor(1, 0.85, 0.4)
+    y = y - 16
+
+    local BAR_STYLES = UI.BAR_STYLES or {
+        { key = "Default", label = "Default" },
+        { key = "Smooth",  label = "Smooth" },
+        { key = "Flat",    label = "Flat" },
+    }
+    local BAR_FONTS = UI.BAR_FONTS or {
+        { key = "Friz",     label = "Friz Quadrata" },
+        { key = "Arial",    label = "Arial Narrow" },
+        { key = "Morpheus", label = "Morpheus" },
+        { key = "Skurri",   label = "Skurri" },
+    }
+    local NUM_FORMATS = {
+        { key = "1k",    label = "1k" },
+        { key = "10k",   label = "10k" },
+        { key = "100k",  label = "100k" },
+        { key = "never", label = "Never" },
+    }
+
+    MakeLabeledDropDown(content, "Bar style:", 4, y, 110, BAR_STYLES, "barStyle")
+    MakeLabeledDropDown(content, "Bar font:", 160, y, 120, BAR_FONTS, "barFont")
+    MakeLabeledDropDown(content, "Number format:", 330, y, 90, NUM_FORMATS, "numberFormat")
+    y = y - 48
+
+    MakeSlider(content, "Bar height", 4, y, "barHeight", 10, 28, 1, 140)
+    MakeSlider(content, "Font size", 200, y, "fontSize", 8, 18, 1, 140)
+    MakeSlider(content, "Frame opacity", 400, y, "frameOpacity", 30, 100, 5, 140)
+    y = y - 40
+
+    MakeDivider(content, y, contentW)
+    y = y - 12
+
+    -- ========== Modes (two columns) ==========
+    sec = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    sec:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y)
+    sec:SetText("Modes")
+    sec:SetTextColor(1, 0.85, 0.4)
+    y = y - 18
+
+    local colWidth = 340
+    local leftX = 0
+    local rightX = 350
+    local leftY = y
+    local rightY = y
+    local rowH = 18
+    local cbSize = 18
+
+    f.modeRows = {}
+
+    local function BuildModeBlock(entry, baseX, startY)
+        local yy = startY
+
+        local header = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        header:SetPoint("TOPLEFT", content, "TOPLEFT", baseX + 4, yy)
+        header:SetText(entry.label)
+        header:SetTextColor(1, 0.85, 0.4)
+
+        local colorBtn = MakeColorSwatch(content, 20, 13)
+        colorBtn:SetPoint("LEFT", header, "RIGHT", 8, 0)
+        local cur = (UI.GetModeColor and UI.GetModeColor(entry.mode)) or { 0.5, 0.5, 0.5 }
+        colorBtn:SetColor(cur[1], cur[2], cur[3])
+
+        local modeKey = entry.mode
+        colorBtn:SetScript("OnClick", function()
+            ShowPalette(this, modeKey, function(r, g, b)
+                SetModeColor(modeKey, r, g, b)
+                colorBtn:SetColor(r, g, b)
+                if UI.ApplySettingsToFrames then
+                    UI:ApplySettingsToFrames()
+                elseif UI.Refresh then
+                    UI:Refresh()
+                end
+            end)
+        end)
+
+        yy = yy - 16
+
+        local row = {
+            mode = entry.mode,
+            threatOnly = entry.threatOnly,
+            header = header,
+            colorBtn = colorBtn,
+            checkboxes = {},
+        }
+
+        local x = baseX + 6
+        -- Enabled first (non-threat)
+        if not entry.threatOnly then
+            local en = true
+            if UI.IsModeEnabled then
+                en = UI.IsModeEnabled(entry.mode)
+            end
+            local enCb
+            enCb = MakeCheckbox(content, "Enabled", x, yy, en, function(checked)
+                local ok = SetModeEnabled(modeKey, checked)
+                if not ok then
+                    enCb:SetChecked(1)
+                    return
+                end
+                ApplyModeEnabledToFrames()
+            end, cbSize)
+            row.enabledCb = enCb
+            x = x + cbSize + 58
+        end
+
+        if entry.columns then
+            local c
+            for c = 1, table.getn(entry.columns) do
+                local col = entry.columns[c]
+                local current = true
+                if UI.GetColumnSetting then
+                    current = UI.GetColumnSetting(entry.mode, col.key)
+                end
+                local colKey = col.key
+                local cb = MakeCheckbox(content, col.label, x, yy, current, function(checked)
+                    SetColumnValue(modeKey, colKey, checked)
+                    if UI.Refresh then UI:Refresh() end
+                end, cbSize)
+                table.insert(row.checkboxes, cb)
+
+                local labelW = 48
+                if col.label == "Share %" then labelW = 52
+                elseif col.label == "Duration" then labelW = 56
+                elseif col.label == "Healing" then labelW = 50
+                elseif col.label == "Damage" then labelW = 50
+                elseif col.label == "Threat" then labelW = 46
+                end
+                x = x + cbSize + labelW
+            end
+        end
+
+        yy = yy - rowH - 6
+        table.insert(f.modeRows, row)
+        return yy
+    end
+
+    local i
+    local mid = math.floor((table.getn(MODE_COLUMN_OPTIONS) + 1) / 2)
+    for i = 1, table.getn(MODE_COLUMN_OPTIONS) do
+        local entry = MODE_COLUMN_OPTIONS[i]
+        if i <= mid then
+            leftY = BuildModeBlock(entry, leftX, leftY)
+        else
+            rightY = BuildModeBlock(entry, rightX, rightY)
+        end
+    end
+
+    local bottomY = leftY
+    if rightY < bottomY then bottomY = rightY end
+
+    local needed = 32 + (-bottomY) + 52
+    if needed < 480 then needed = 480 end
+    if needed > 700 then needed = 700 end
+    f:SetHeight(needed)
+
+    local close = (UI.CreateButton and UI.CreateButton(f, "Close", 70, 20, function()
+        HidePalette()
+        f:Hide()
+    end)) or CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    if not UI.CreateButton then
+        close:SetWidth(70)
+        close:SetHeight(20)
+        close:SetText("Close")
+        close:SetScript("OnClick", function()
+            HidePalette()
+            f:Hide()
+        end)
+    end
+    close:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
+
+    local reset = UI.CreateButton and UI.CreateButton(f, "Reset Defaults", 110, 20, function()
+        OM:SetSetting("columnConfig", nil)
+        OM:SetSetting("modeColors", nil)
+        OM:SetSetting("modeEnabled", nil)
+        OM:SetSetting("abbreviateNames", false)
+        if f.abvCb then f.abvCb:SetChecked(nil) end
+
+        local r
+        for r = 1, table.getn(f.modeRows) do
+            local row = f.modeRows[r]
+            local entry
+            local j
+            for j = 1, table.getn(MODE_COLUMN_OPTIONS) do
+                if MODE_COLUMN_OPTIONS[j].mode == row.mode then
+                    entry = MODE_COLUMN_OPTIONS[j]
+                    break
+                end
+            end
+            local defCol = (UI.MODE_COLOR_DEFAULTS and UI.MODE_COLOR_DEFAULTS[row.mode])
+                or { 0.6, 0.6, 0.6 }
+            if row.colorBtn then
+                row.colorBtn:SetColor(defCol[1], defCol[2], defCol[3])
+            end
+            if entry and entry.columns then
+                local c
+                for c = 1, table.getn(entry.columns) do
+                    local col = entry.columns[c]
+                    local on = true
+                    if UI.COLUMN_DEFAULTS and UI.COLUMN_DEFAULTS[row.mode]
+                        and UI.COLUMN_DEFAULTS[row.mode][col.key] ~= nil then
+                        on = UI.COLUMN_DEFAULTS[row.mode][col.key]
+                    end
+                    if row.checkboxes[c] then
+                        row.checkboxes[c]:SetChecked(on and 1 or nil)
+                    end
+                end
+            end
+            if row.enabledCb then
+                row.enabledCb:SetChecked(1)
+            end
+        end
+        ApplyModeEnabledToFrames()
+        if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+        if UI.Refresh then UI:Refresh() end
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Customization settings reset to defaults.")
+    end)
+    if reset then
+        reset:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
+    end
+
+    f:SetScript("OnHide", function()
+        HidePalette()
+    end)
+
+    f:Hide()
+    UI.customizationFrame = f
+    return f
+end
+
+local function RefreshThreatVisibility(f)
+    if not f or not f.modeRows then return end
+    local threatOn = OM.GetSetting and OM:GetSetting("enableThreatMode") == true
+    local r
+    for r = 1, table.getn(f.modeRows) do
+        local row = f.modeRows[r]
+        if row.threatOnly then
+            if row.header then
+                if threatOn then
+                    row.header:SetTextColor(1, 0.85, 0.4)
+                else
+                    row.header:SetTextColor(0.5, 0.5, 0.5)
+                end
+            end
+            if row.colorBtn then
+                if threatOn then
+                    row.colorBtn:Enable()
+                    row.colorBtn:EnableMouse(true)
+                else
+                    row.colorBtn:Disable()
+                    row.colorBtn:EnableMouse(false)
+                end
+            end
+            local c
+            for c = 1, table.getn(row.checkboxes) do
+                local cb = row.checkboxes[c]
+                if threatOn then
+                    cb:Enable()
+                    if cb.label then cb.label:SetTextColor(1, 1, 1) end
+                else
+                    cb:Disable()
+                    if cb.label then cb.label:SetTextColor(0.5, 0.5, 0.5) end
+                end
+            end
+        end
+    end
+end
+
+function UI:ToggleCustomization()
+    EnsureDefaults()
+    if not OM.db and OM.InitDB then
+        OM:InitDB()
+    end
+
+    local ok, f = pcall(CreateCustomizationFrame)
+    if not ok then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffff5555GreedMeter:|r Customization failed: " .. tostring(f))
+        return
+    end
+    if not f then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffff5555GreedMeter:|r Customization frame missing.")
+        return
+    end
+
+    if f:IsShown() then
+        HidePalette()
+        f:Hide()
+        return
+    end
+
+    if f.abvCb then
+        f.abvCb:SetChecked((OM:GetSetting("abbreviateNames") == true) and 1 or nil)
+    end
+    local r
+    for r = 1, table.getn(f.modeRows or {}) do
+        local row = f.modeRows[r]
+        if row.colorBtn and UI.GetModeColor then
+            local col = UI.GetModeColor(row.mode)
+            row.colorBtn:SetColor(col[1], col[2], col[3])
+        end
+        if row.enabledCb and UI.IsModeEnabled then
+            row.enabledCb:SetChecked(UI.IsModeEnabled(row.mode) and 1 or nil)
+        end
+    end
+    RefreshThreatVisibility(f)
+
+    -- Close anything that might sit on top / eat clicks
+    HidePalette()
+    if UI.CloseDropdown then UI.CloseDropdown() end
+    if UI.dropdownCloser then UI.dropdownCloser:Hide() end
+
+    -- Do NOT SetFrameLevel here — raising the parent after children exist
+    -- puts the backdrop above the checkboxes on 1.12.
+    f:SetFrameStrata("DIALOG")
+    f:ClearAllPoints()
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+    f:Show()
+end
+
+-- Backward-compatible alias + explicit global registration
+UI.ToggleAdvanced = UI.ToggleCustomization
+GreedMeter.UI = UI
+GreedMeter.UI.ToggleCustomization = UI.ToggleCustomization
+GreedMeter.UI.ToggleAdvanced = UI.ToggleCustomization
+GreedMeter._customizationLoaded = true
+
 
 OM:RegisterModule("UI", UI)

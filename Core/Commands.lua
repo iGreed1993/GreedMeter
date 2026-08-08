@@ -48,10 +48,19 @@ SlashCmdList["GREEDMETER"] = function(msg)
         if OM.modules and OM.modules.UI and OM.modules.UI.ToggleSettings then
             OM.modules.UI:ToggleSettings()
         end
+    elseif cmd == "cust" or cmd == "custom" or cmd == "customization" then
+        local ui = (OM.modules and OM.modules.UI) or OM.UI
+        if ui and ui.ToggleCustomization then
+            ui:ToggleCustomization()
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff5555GreedMeter:|r Customization not loaded (UI/Customization.lua missing or failed).")
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff5555|r Loaded flag: " .. tostring(OM._customizationLoaded))
+        end
     elseif cmd == "help" then
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter commands:|r")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffffff/gdm|r or |cffffffff/gdm show|r - show/hide meters")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffffff/gdm set|r or |cffffffff/gdm settings|r - open settings")
+        DEFAULT_CHAT_FRAME:AddMessage("  |cffffffff/gdm cust|r - open customization")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffffff/gdm reset|r - clear all recorded data")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffffff/gdm range|r - show combat log range")
         DEFAULT_CHAT_FRAME:AddMessage("  |cffffffff/gdm range 200|r - set range to 200 yards")

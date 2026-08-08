@@ -1222,28 +1222,42 @@ local function FormatThreatSecondary(data)
     local threat = data.threat or 0
     local perc   = data.perc or 0
     local tps    = data.tps or 0
-    local text
-    if UI.FormatNumber then
-        text = UI.FormatNumber(threat)
-    else
-        text = tostring(math.floor(threat + 0.5))
-    end
 
-    -- Always show % of main tank in normal Threat mode
-    if Threat.tankName and not data.tank then
-        local tankData = Threat.threats[Threat.tankName]
-        local tankThreat = tankData and tankData.threat or 0
-        if tankThreat > 0 then
-            local ofTank = math.floor((threat / tankThreat) * 100 + 0.5)
-            text = text .. " (" .. tostring(ofTank) .. "% MT)"
-        else
-            text = text .. " (" .. tostring(perc) .. "%)"
+    local function show(key)
+        if UI.GetColumnSetting then
+            return UI.GetColumnSetting("threat", key)
         end
-    else
-        text = text .. " (" .. tostring(perc) .. "%)"
+        return true
     end
 
-    if tps and tps > 0 then
+    local text = ""
+    if show("amount") then
+        if UI.FormatNumber then
+            text = UI.FormatNumber(threat)
+        else
+            text = tostring(math.floor(threat + 0.5))
+        end
+    end
+
+    -- % of main tank / raw percent
+    if show("share") then
+        local shareStr
+        if Threat.tankName and not data.tank then
+            local tankData = Threat.threats[Threat.tankName]
+            local tankThreat = tankData and tankData.threat or 0
+            if tankThreat > 0 then
+                local ofTank = math.floor((threat / tankThreat) * 100 + 0.5)
+                shareStr = " (" .. tostring(ofTank) .. "% MT)"
+            else
+                shareStr = " (" .. tostring(perc) .. "%)"
+            end
+        else
+            shareStr = " (" .. tostring(perc) .. "%)"
+        end
+        text = text .. shareStr
+    end
+
+    if show("rate") and tps and tps > 0 then
         if UI.FormatNumber then
             text = text .. "(" .. UI.FormatNumber(tps) .. ")"
         else
@@ -1252,6 +1266,9 @@ local function FormatThreatSecondary(data)
     end
     if data.estimated then
         text = text .. "*"
+    end
+    if text == "" or text == "*" then
+        return "0"
     end
     return text
 end
@@ -1464,7 +1481,11 @@ function Threat:RefreshFrame(f)
                     bar.nameText:SetText(entry.name)
                 else
                     local label = entry.displayName or entry.name
-                    bar.nameText:SetText(rank .. ". " .. label)
+                    if UI.FormatBarName then
+                        bar.nameText:SetText(UI.FormatBarName(rank, label, mode))
+                    else
+                        bar.nameText:SetText(rank .. ". " .. label)
+                    end
                 end
             end
             if bar.valueText then
@@ -1751,7 +1772,8 @@ local function AddThreatCheckboxToSettings(f)
         end
     end
 
-    local baseY = 40
+    -- Sit above the bottom Customization / Close buttons (~36-44px)
+    local baseY = 44
     local rowH  = 22
     local dropH = 32 -- UIDropDownMenu is taller than a checkbox row
     -- Extra vertical space if any dropdown is present
@@ -1943,9 +1965,13 @@ local function AddThreatCheckboxToSettings(f)
 
     f._greedThreatCheckbox = true
 
-    local extraH = math.max(0, (totalRows - 1) * rowH)
-    if f:GetHeight() < 510 + extraH then
-        f:SetHeight(510 + extraH)
+    -- Grow the frame just enough for threat extras + bottom button strip
+    local threatBlockH = totalRows * rowH + (hasDrop and (dropH - rowH) or 0) + 12
+    local minMain = 300  -- main settings content (checkboxes + right column)
+    local needed = minMain + threatBlockH
+    if needed < 340 then needed = 340 end
+    if f:GetHeight() < needed then
+        f:SetHeight(needed)
     end
 end
 

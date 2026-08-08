@@ -161,19 +161,33 @@ local MODE_COMPACT = {
     cc = "CC",
     ccbreak = "CCb",
     deaths = "De",
+    threat = "Th",
+    tank = "Tnk",
+    overall = "ThO",
 }
 
--- Mode tint colors for header button glow (r, g, b)
-local MODE_BTN_COLORS = {
-    damage     = { 1.00, 0.55, 0.10 }, -- Orange
-    healing    = { 0.20, 0.85, 0.30 }, -- Green
-    interrupts = { 1.00, 0.90, 0.20 }, -- Yellow
-    dispels    = { 1.00, 0.40, 0.75 }, -- Pink
-    cc         = { 0.30, 0.55, 1.00 }, -- Blue
-    ccbreak    = { 0.70, 0.35, 0.95 }, -- Purple
-    deaths     = { 0.95, 0.20, 0.20 }, -- Red
-    taken      = { 0.15, 0.85, 0.85 }, -- Cyan (damage taken)
+-- Mode tint colors come from Advanced Customization (UI.GetModeColor).
+-- Fallback table only used if Advanced/Init helpers are not loaded yet.
+local MODE_BTN_COLORS_FALLBACK = {
+    damage     = { 1.00, 0.55, 0.10 },
+    healing    = { 0.20, 0.85, 0.30 },
+    interrupts = { 1.00, 0.90, 0.20 },
+    dispels    = { 1.00, 0.40, 0.75 },
+    cc         = { 0.30, 0.55, 1.00 },
+    ccbreak    = { 0.70, 0.35, 0.95 },
+    deaths     = { 0.95, 0.20, 0.20 },
+    taken      = { 0.15, 0.85, 0.85 },
+    threat     = { 0.95, 0.88, 0.55 },
+    tank       = { 0.95, 0.88, 0.55 },
+    overall    = { 0.95, 0.88, 0.55 },
 }
+
+local function ResolveModeColor(mode)
+    if UI.GetModeColor then
+        return UI.GetModeColor(mode)
+    end
+    return MODE_BTN_COLORS_FALLBACK[mode or "damage"]
+end
 
 local DEFAULT_BTN_BG = { 0.15, 0.15, 0.15, 0.75 }
 local DEFAULT_BTN_BORDER = { 0.55, 0.55, 0.55, 1 }
@@ -182,7 +196,7 @@ local function ApplyHeaderButtonColors(f)
     if not f then return end
     local enabled = OM.GetSetting and OM:GetSetting("buttonsColorWithMode") == true
     local mode = f.mode or "damage"
-    local col = MODE_BTN_COLORS[mode]
+    local col = ResolveModeColor(mode)
 
     local function tint(btn)
         if not btn then return end
@@ -473,7 +487,15 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
     modeBtn:SetScript("OnClick", function()
         local opts = {}
         for _, key in ipairs(MODE_ORDER) do
-            table.insert(opts, { value = key, label = MODE_LABELS[key] })
+            -- Hide modes the user disabled in Advanced Customization
+            if UI.IsModeEnabled and not UI.IsModeEnabled(key) then
+                -- skip
+            else
+                table.insert(opts, { value = key, label = MODE_LABELS[key] or key })
+            end
+        end
+        if table.getn(opts) == 0 then
+            table.insert(opts, { value = "damage", label = MODE_LABELS.damage or "Damage" })
         end
         ShowDropdown(modeBtn, opts, function(value, label)
             f.mode = value
@@ -897,6 +919,13 @@ function UI:LayoutBars(f)
 end
 
 function UI:RefreshFrame(f)
+    if f and f.mode and UI.IsModeEnabled and not UI.IsModeEnabled(f.mode) then
+        local nextMode = (UI.FirstEnabledMode and UI.FirstEnabledMode()) or "damage"
+        f.mode = nextMode
+        if f.title and MODE_LABELS then
+            f.title:SetText(MODE_LABELS[nextMode] or nextMode)
+        end
+    end
     if not f then return end
     if not f.visibleBars then
         self:LayoutBars(f)
@@ -1047,7 +1076,7 @@ function UI:RefreshFrame(f)
             bar:Show()
             bar:SetValue(pct)
             if entry.isTotal then
-                local modeCol = MODE_BTN_COLORS[mode]
+                local modeCol = ResolveModeColor(mode)
                 if OM.GetSetting and OM:GetSetting("buttonsColorWithMode") == true and modeCol then
                     bar:SetStatusBarColor(modeCol[1], modeCol[2], modeCol[3], 0.90)
                 else
@@ -1092,7 +1121,11 @@ function UI:RefreshFrame(f)
                     bar.nameText:ClearAllPoints()
                     bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
                 end
-                bar.nameText:SetText(rank .. ". " .. entry.name)
+                if UI.FormatBarName then
+                    bar.nameText:SetText(UI.FormatBarName(rank, entry.name, mode))
+                else
+                    bar.nameText:SetText(rank .. ". " .. entry.name)
+                end
                 bar.valueText:SetText(GetSecondaryText(entry.data, mode, duration, metricTotal))
             end
             bar.entry = entry
@@ -1157,10 +1190,14 @@ function UI:AddFrame(sourceFrame)
         used[fr.mode] = true
     end
     for _, key in ipairs(MODE_ORDER) do
-        if not used[key] then
+        if not used[key] and (not UI.IsModeEnabled or UI.IsModeEnabled(key)) then
             f.mode = key
             break
         end
+    end
+    -- If chosen mode ended up disabled, snap to first enabled
+    if UI.IsModeEnabled and not UI.IsModeEnabled(f.mode) then
+        f.mode = (UI.FirstEnabledMode and UI.FirstEnabledMode()) or "damage"
     end
     f:Show()
     self:RefreshFrame(f)

@@ -309,50 +309,274 @@ local function GetSegmentDuration(segment, segmentKey)
     return 0
 end
 
+-- Column visibility helpers (Advanced Customization). Defaults live here so
+-- bar rendering works even before UI/Advanced.lua finishes loading.
+-- abvName is global (abbreviateNames setting), not per-mode.
+local COLUMN_DEFAULTS = {
+    damage     = { rank = true, amount = true, share = true,  rate = true  },
+    healing    = { rank = true, amount = true, share = true,  rate = true  },
+    taken      = { rank = true, amount = true, share = true,  rate = false },
+    interrupts = { rank = true, amount = true },
+    dispels    = { rank = true, amount = true },
+    cc         = { rank = true, amount = true, duration = true },
+    ccbreak    = { rank = true, amount = true },
+    deaths     = { rank = true, amount = true },
+    threat     = { rank = true, amount = true, share = true,  rate = true  },
+    tank       = { rank = true, amount = true },
+    overall    = { rank = true, amount = true, share = true,  rate = true  },
+}
+
+-- Which standard modes appear in the meter mode list / are parsed.
+-- Threat modes are controlled separately by the Threat module settings.
+local MODE_ENABLED_DEFAULTS = {
+    damage     = true,
+    healing    = true,
+    taken      = true,
+    interrupts = true,
+    dispels    = true,
+    cc         = true,
+    ccbreak    = true,
+    deaths     = true,
+}
+
+local function IsModeEnabled(mode)
+    if not mode then return true end
+    -- Threat modes: always "enabled" here; Threat.lua gates them itself
+    if mode == "threat" or mode == "tank" or mode == "overall" then
+        return true
+    end
+    local cfg = OM.GetSetting and OM:GetSetting("modeEnabled")
+    if cfg and cfg[mode] ~= nil then
+        return cfg[mode] and true or false
+    end
+    if MODE_ENABLED_DEFAULTS[mode] ~= nil then
+        return MODE_ENABLED_DEFAULTS[mode] and true or false
+    end
+    return true
+end
+
+-- First enabled mode in MODE_ORDER (for snapping frames off disabled modes)
+local function FirstEnabledMode()
+    local i
+    for i = 1, table.getn(MODE_ORDER) do
+        local key = MODE_ORDER[i]
+        if IsModeEnabled(key) then
+            return key
+        end
+    end
+    return "damage"
+end
+
+-- Default mode tint colors (also the palette offered in Advanced)
+local MODE_COLOR_DEFAULTS = {
+    damage     = { 1.00, 0.55, 0.10 }, -- Orange
+    healing    = { 0.20, 0.85, 0.30 }, -- Green
+    interrupts = { 1.00, 0.90, 0.20 }, -- Yellow
+    dispels    = { 1.00, 0.40, 0.75 }, -- Pink
+    cc         = { 0.30, 0.55, 1.00 }, -- Blue
+    ccbreak    = { 0.70, 0.35, 0.95 }, -- Purple
+    deaths     = { 0.95, 0.20, 0.20 }, -- Red
+    taken      = { 0.15, 0.85, 0.85 }, -- Cyan
+    threat     = { 0.95, 0.88, 0.55 }, -- Soft gold
+    tank       = { 0.95, 0.88, 0.55 }, -- Soft gold
+    overall    = { 0.95, 0.88, 0.55 }, -- Soft gold
+}
+
+-- Unique palette entries for the color picker (15 colors)
+local MODE_COLOR_PALETTE = {
+    { 1.00, 0.55, 0.10 }, -- Orange
+    { 0.20, 0.85, 0.30 }, -- Green
+    { 1.00, 0.90, 0.20 }, -- Yellow
+    { 1.00, 0.40, 0.75 }, -- Pink
+    { 0.30, 0.55, 1.00 }, -- Blue
+    { 0.70, 0.35, 0.95 }, -- Purple
+    { 0.95, 0.20, 0.20 }, -- Red
+    { 0.15, 0.85, 0.85 }, -- Cyan
+    { 0.95, 0.88, 0.55 }, -- Soft gold
+    { 0.95, 0.95, 0.95 }, -- White
+    { 0.70, 0.45, 0.25 }, -- Brown
+    { 0.55, 0.95, 0.20 }, -- Lime
+    { 0.95, 0.20, 0.70 }, -- Magenta
+    { 0.10, 0.65, 0.55 }, -- Teal
+    { 1.00, 0.50, 0.40 }, -- Coral
+}
+
+local function GetColumnSetting(mode, key)
+    if not mode or not key then return nil end
+    local cfg = OM.GetSetting and OM:GetSetting("columnConfig")
+    if cfg and cfg[mode] and cfg[mode][key] ~= nil then
+        return cfg[mode][key] and true or false
+    end
+    local def = COLUMN_DEFAULTS[mode]
+    if def and def[key] ~= nil then
+        return def[key] and true or false
+    end
+    -- Unknown key: treat as visible so we never accidentally hide data
+    return true
+end
+
+-- ColorsApproxEqual for matching palette entries
+local function ColorsEqual(a, b)
+    if not a or not b then return false end
+    return math.abs((a[1] or 0) - (b[1] or 0)) < 0.02
+       and math.abs((a[2] or 0) - (b[2] or 0)) < 0.02
+       and math.abs((a[3] or 0) - (b[3] or 0)) < 0.02
+end
+
+local function GetModeColor(mode)
+    mode = mode or "damage"
+    local saved = OM.GetSetting and OM:GetSetting("modeColors")
+    if saved and saved[mode] and type(saved[mode]) == "table" then
+        return saved[mode]
+    end
+    return MODE_COLOR_DEFAULTS[mode] or { 0.6, 0.6, 0.6 }
+end
+
+-- Multi-word: first 3 letters of each word (spaces kept).
+-- Single word: first 4 characters.
+local function AbbreviateName(name)
+    if not name or name == "" then return name end
+    local words = {}
+    -- Lua 5.0: string.gfind (gmatch is 5.1+)
+    local gfind = string.gfind or string.gmatch
+    if gfind then
+        for w in gfind(name, "%S+") do
+            table.insert(words, w)
+        end
+    end
+    local n = table.getn(words)
+    if n == 0 then
+        return name
+    end
+    if n == 1 then
+        if string.len(words[1]) > 4 then
+            return string.sub(words[1], 1, 4)
+        end
+        return words[1]
+    end
+    local parts = {}
+    local i
+    for i = 1, n do
+        local w = words[i]
+        if string.len(w) > 3 then
+            table.insert(parts, string.sub(w, 1, 3))
+        else
+            table.insert(parts, w)
+        end
+    end
+    local s = parts[1]
+    for i = 2, table.getn(parts) do
+        s = s .. " " .. parts[i]
+    end
+    return s
+end
+
+-- Build left-side bar label: optional "N. " + optional abbreviated name
+local function FormatBarName(rank, name, mode)
+    name = name or ""
+    local showRank = GetColumnSetting(mode, "rank")
+    local abv = OM.GetSetting and OM:GetSetting("abbreviateNames") == true
+    if abv then
+        name = AbbreviateName(name)
+    end
+    if showRank and rank then
+        return tostring(rank) .. ". " .. name
+    end
+    return name
+end
+
+-- Lua 5.0 has no table.concat
+local function JoinParts(parts, sep)
+    sep = sep or " "
+    local n = table.getn(parts)
+    if n == 0 then return "" end
+    if n == 1 then return parts[1] end
+    local s = parts[1]
+    local i
+    for i = 2, n do
+        s = s .. sep .. parts[i]
+    end
+    return s
+end
+
 -- total is optional: overall sum for share %
--- Format for damage/healing: Amount (share%)(dps/hps)
+-- Format for damage/healing: Amount (share%)(dps/hps) — each piece optional via columnConfig
 local function GetSecondaryText(data, mode, duration, total)
+    if not data then return "" end
+
+    local function show(key)
+        return GetColumnSetting(mode, key)
+    end
+
     if mode == "damage" then
         local dmg = data.damage or 0
-        local text = FormatNumber(dmg)
-        if total and total > 0 then
+        local parts = {}
+        if show("amount") then
+            table.insert(parts, FormatNumber(dmg))
+        end
+        if show("share") and total and total > 0 then
             local share = (dmg / total) * 100
-            text = text .. " (" .. string.format("%.1f", share) .. "%)"
+            table.insert(parts, "(" .. string.format("%.1f", share) .. "%)")
         end
-        -- Prefer average segment DPS (overall) when samples exist
-        local dps = nil
-        if data.dpsSamples and data.dpsSamples > 0 and data.dpsSum then
-            dps = data.dpsSum / data.dpsSamples
-        elseif duration and duration > 0 then
-            dps = dmg / duration
+        if show("rate") then
+            local dps = nil
+            if data.dpsSamples and data.dpsSamples > 0 and data.dpsSum then
+                dps = data.dpsSum / data.dpsSamples
+            elseif duration and duration > 0 then
+                dps = dmg / duration
+            end
+            if dps then
+                table.insert(parts, "(" .. FormatNumber(dps) .. ")")
+            end
         end
-        if dps then
-            text = text .. "(" .. FormatNumber(dps) .. ")"
-        end
-        return text
+        return JoinParts(parts, " ")
     elseif mode == "healing" then
         local eh = data.healing or 0
-        local text = FormatNumber(eh)
-        if total and total > 0 then
+        local parts = {}
+        if show("amount") then
+            table.insert(parts, FormatNumber(eh))
+        end
+        if show("share") and total and total > 0 then
             local share = (eh / total) * 100
-            text = text .. " (" .. string.format("%.1f", share) .. "%)"
+            table.insert(parts, "(" .. string.format("%.1f", share) .. "%)")
         end
-        local hps = nil
-        if data.hpsSamples and data.hpsSamples > 0 and data.hpsSum then
-            hps = data.hpsSum / data.hpsSamples
-        elseif duration and duration > 0 then
-            hps = eh / duration
+        if show("rate") then
+            local hps = nil
+            if data.hpsSamples and data.hpsSamples > 0 and data.hpsSum then
+                hps = data.hpsSum / data.hpsSamples
+            elseif duration and duration > 0 then
+                hps = eh / duration
+            end
+            if hps then
+                table.insert(parts, "(" .. FormatNumber(hps) .. ")")
+            end
         end
-        if hps then
-            text = text .. "(" .. FormatNumber(hps) .. ")"
-        end
-        -- Overheal only in tooltip, not on the bar
-        return text
+        return JoinParts(parts, " ")
     elseif mode == "cc" then
         local c = data.count or 0
         local d = data.duration or 0
-        return c .. " (" .. string.format("%.1f", d) .. "s)"
+        local parts = {}
+        if show("amount") then
+            table.insert(parts, tostring(c))
+        end
+        if show("duration") then
+            table.insert(parts, "(" .. string.format("%.1f", d) .. "s)")
+        end
+        return JoinParts(parts, " ")
+    elseif mode == "taken" then
+        local val = data.damageTaken or GetMetric(data, mode) or 0
+        local parts = {}
+        if show("amount") then
+            table.insert(parts, FormatNumber(val))
+        end
+        if show("share") and total and total > 0 then
+            local share = (val / total) * 100
+            table.insert(parts, "(" .. string.format("%.1f", share) .. "%)")
+        end
+        return JoinParts(parts, " ")
     else
+        -- interrupts, dispels, deaths, ccbreak, etc.
+        if not show("amount") then return "" end
         return FormatNumber(GetMetric(data, mode))
     end
 end
@@ -846,3 +1070,14 @@ UI.BuildSortedList = BuildSortedList
 UI.CloseDropdown = CloseDropdown
 UI.ShowDropdown = ShowDropdown
 UI.ShowBarTooltip = ShowBarTooltip
+UI.GetColumnSetting = GetColumnSetting
+UI.FormatBarName = FormatBarName
+UI.GetModeColor = GetModeColor
+UI.AbbreviateName = AbbreviateName
+UI.IsModeEnabled = IsModeEnabled
+UI.FirstEnabledMode = FirstEnabledMode
+UI.COLUMN_DEFAULTS = COLUMN_DEFAULTS
+UI.MODE_ENABLED_DEFAULTS = MODE_ENABLED_DEFAULTS
+UI.MODE_COLOR_DEFAULTS = MODE_COLOR_DEFAULTS
+UI.MODE_COLOR_PALETTE = MODE_COLOR_PALETTE
+UI.ColorsEqual = ColorsEqual

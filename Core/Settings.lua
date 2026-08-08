@@ -30,6 +30,8 @@ OM.defaults = {
     confirmReset = false,
     confirmAnnounce = false,
     accountWideLayout = false, -- when true, window size/pos/count is shared across characters
+    abbreviateNames = false,
+    -- columnConfig, modeColors, modeEnabled are created on demand by Customization
 }
 
 -- Per-character layout defaults

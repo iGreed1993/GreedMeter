@@ -43,6 +43,17 @@ local fightBossName = nil
 
 local playerName = nil
 
+-- Optional mode gates (Advanced Customization "Enabled" checkboxes).
+-- When a mode is disabled we skip storing its metrics to save CPU/memory.
+local function ModeEnabled(mode)
+    local UI = GreedMeter and GreedMeter.UI
+    if UI and UI.IsModeEnabled then
+        return UI.IsModeEnabled(mode)
+    end
+    return true
+end
+
+
 -- Resolve "You" and SuperWoW-style pet ownership names
 local function NormalizeName(name)
     if not name then return nil end
@@ -765,34 +776,39 @@ function Parser:AddDamage(source, amount, spell, target)
 
     target = NormalizeName(target)
 
-    local p = EnsurePlayer(OM.data.current, source)
-    if p then
-        p.damage = p.damage + amount
-        if spell then
-            p.damageSpells[spell] = (p.damageSpells[spell] or 0) + amount
+    if ModeEnabled("damage") then
+        local p = EnsurePlayer(OM.data.current, source)
+        if p then
+            p.damage = p.damage + amount
+            if spell then
+                p.damageSpells[spell] = (p.damageSpells[spell] or 0) + amount
+            end
+            if target then
+                p.damageTo[target] = (p.damageTo[target] or 0) + amount
+                NoteLastHit(target, source, spell, amount)
+            end
         end
-        if target then
-            p.damageTo[target] = (p.damageTo[target] or 0) + amount
-            NoteLastHit(target, source, spell, amount)
-        end
-    end
 
-    local o = EnsurePlayer(OM.data.overall, source)
-    if o then
-        o.damage = o.damage + amount
-        if spell then
-            o.damageSpells[spell] = (o.damageSpells[spell] or 0) + amount
+        local o = EnsurePlayer(OM.data.overall, source)
+        if o then
+            o.damage = o.damage + amount
+            if spell then
+                o.damageSpells[spell] = (o.damageSpells[spell] or 0) + amount
+            end
+            if target then
+                o.damageTo[target] = (o.damageTo[target] or 0) + amount
+            end
         end
-        if target then
-            o.damageTo[target] = (o.damageTo[target] or 0) + amount
-        end
+    elseif target then
+        -- Still track last-hit for death tooltips even when damage mode is off
+        NoteLastHit(target, source, spell, amount)
     end
     -- Interrupt abilities: combat log rarely reports "interrupted X"; count uses instead
-    if spell and Parser.IsInterruptAbility and Parser.IsInterruptAbility(spell) then
+    if ModeEnabled("interrupts") and spell and Parser.IsInterruptAbility and Parser.IsInterruptAbility(spell) then
         Parser:AddInterrupt(source, spell)
     end
     -- Breakable CC: first damage to a CC'd target credits the breaker
-    if target and Parser.NoteBreakableCCDamage then
+    if ModeEnabled("ccbreak") and target and Parser.NoteBreakableCCDamage then
         Parser.NoteBreakableCCDamage(target, source, spell)
     end
     NoteActivity()
@@ -802,6 +818,7 @@ end
 -- healing field stores EFFECTIVE healing (amount - overheal)
 -- overhealing tracked separately for later tooltip %
 function Parser:AddHealing(source, amount, spell, isAbsorb, target)
+    if not ModeEnabled("healing") then return end
     source = ResolveSource(source)
     if not source or not amount or amount <= 0 then return end
     if not IsTracked(source) and not OM.players[source] then return end
@@ -843,6 +860,7 @@ function Parser:AddHealing(source, amount, spell, isAbsorb, target)
 end
 
 function Parser:AddDamageTaken(target, amount, source, spell)
+    if not ModeEnabled("taken") then return end
     target = NormalizeName(target)
     if not target or not amount or amount <= 0 then return end
     if not OM.players[target] then return end -- only track damage taken by our group
@@ -864,6 +882,7 @@ function Parser:AddDamageTaken(target, amount, source, spell)
 end
 
 function Parser:AddDispel(source, what, target)
+    if not ModeEnabled("dispels") then return end
     source = ResolveSource(source)
     if not source then return end
     -- Prefer group members; still allow if we somehow see it
@@ -888,6 +907,7 @@ function Parser:AddDispel(source, what, target)
 end
 
 function Parser:AddInterrupt(source, what)
+    if not ModeEnabled("interrupts") then return end
     source = ResolveSource(source)
     if not source then return end
     if not IsTracked(source) and not OM.players[source] then return end
@@ -952,6 +972,7 @@ end
 
 -- Record that an enemy was CC'd (no caster required). Duration = estimate.
 function Parser:AddEnemyCC(spell, target, maxDuration)
+    if not ModeEnabled("cc") then return end
     target = NormalizeName(target)
     if not target or target == "" then return end
     -- Don't track our own group as CC targets in this mode
@@ -1000,6 +1021,7 @@ function Parser:FlushActiveCCs()
 end
 
 function Parser:AddCCBreak(breaker, ccSpell, target)
+    if not ModeEnabled("ccbreak") then return end
     breaker = ResolveSource(breaker)
     if not breaker then return end
     if not IsTracked(breaker) and not OM.players[breaker] then return end
@@ -1020,6 +1042,7 @@ end
 
 
 function Parser:AddDeath(name, lastHit)
+    if not ModeEnabled("deaths") then return end
     name = NormalizeName(name)
     if not name then return end
     if not OM.players[name] and name ~= (playerName or UnitName("player")) then
