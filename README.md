@@ -4,6 +4,9 @@ A lightweight combat meter for Vanilla 1.12 (and private servers based on it).
 
 GreedMeter tracks damage, healing, dispels, interrupts, hard CCs, CC breaks, damage taken, and deaths. It is designed to work cleanly on classic clients, with optional SuperWoW support for more accurate pet ownership and combat-log range.
 
+![GreedMeter](ScreenShots/GreedMeterWindows.png)
+![GreedMeter](ScreenShots/GreedMeterThreat.png)
+
 ### Features
 
 * **Multiple meter windows** – Open extra frames (up to 6) so you can watch Damage, Healing, Interrupts, etc. at the same time
@@ -33,7 +36,7 @@ GreedMeter tracks damage, healing, dispels, interrupts, hard CCs, CC breaks, dam
 | `/gdm help` | Show this help |
 
 ![GreedMeter](ScreenShots/GreedMeterSettings.png)
-![GreedMeter](ScreenShots/GreedMeter.png)
+![GreedMeter](ScreenShots/GreedMeterCustom.png)
 
 ### Installation
 
