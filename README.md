@@ -10,17 +10,17 @@ GreedMeter tracks damage, healing, dispels, interrupts, hard CCs, CC breaks, dam
 ### Features
 
 * **Multiple meter windows** – Open extra frames (up to 6) so you can watch Damage, Healing, Interrupts, etc. at the same time
-* **Modes** – Damage, Healing, Dispels, Damage Taken, Interrupts, CC, CC Breaks, Deaths
+* **Modes** – Damage, Healing, Dispels, Damage Taken, Interrupts, CC, CC Breaks, Deaths, Threat
 * **Segments** – Current fight, Overall, recent fights, and recent boss fights
 * **Absorbs automatically included in healing**
-* **CC tracking** – Lists enemies that were crowd-controlled (estimated duration)
+* **CC tracking** – Lists enemies that were crowd-controlled and any broken CCs (estimated duration)
 * **Class icons** – Optional class icons before player names on the bars
 * **Combat log range** – Expand beyond the default 40 yards (up to 200) so distant raid members are still tracked
 * **Announce** – Report a window to SAY / PARTY / RAID (with optional confirmation)
 * **Name filter** – Quickly hide individual players from a window
 * **Layout saving** – Position, size, mode, and shown state saved per character (or account-wide if enabled in settings)
 * **Minimap button** – Left-click toggle meters, right-click settings, drag to reposition
-* **Settings** – Class colors, bar height, font size, opacity, lock frames, 3 bar styles (Default, Smooth, Flat), 4 fonts (Friz Quadrata, Arial Narrow, Morpheus, Skurri), and more
+* **Settings** – Class colors, bar height, font size, opacity, lock frames, Customization and more
 
 ### Commands
 
