@@ -323,7 +323,7 @@ local COLUMN_DEFAULTS = {
     deaths     = { rank = true, amount = true },
     threat     = { rank = true, amount = true, share = true,  rate = true  },
     tank       = { rank = true, amount = true },
-    overall    = { rank = true, amount = true, share = true,  rate = true  },
+    overall    = { rank = true, amount = true, share = false, rate = false, targeted = true },
 }
 
 -- Which standard modes appear in the meter mode list / are parsed.

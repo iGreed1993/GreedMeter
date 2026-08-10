@@ -230,6 +230,7 @@ local function EnsurePlayer(segment, name)
         healingTo = {},
         damageSpells = {},
         healSpells = {},
+        threatCasts = {},  -- non-damaging threat apps (Sunder, Demo Shout, ...)
         class = class,
     }
     segment.players[name] = p
@@ -640,6 +641,12 @@ local function DeepCopyPlayerData(data)
             p.damageSpells[k] = v
         end
     end
+    if data.threatCasts then
+        p.threatCasts = {}
+        for k, v in pairs(data.threatCasts) do
+            p.threatCasts[k] = v
+        end
+    end
     if data.healSpells then
         for k, v in pairs(data.healSpells) do
             p.healSpells[k] = v
@@ -732,6 +739,47 @@ local function NoteActivity()
     if OM.data and OM.data.current then
         OM.data.current.lastActivityTime = GetTime()
     end
+end
+
+-- Abilities that generate threat with little or no damage component.
+-- Counted from cast/perform combat-log lines for estimate use.
+local THREAT_CAST_ABILITIES = {
+    ["Sunder Armor"] = true,
+    ["Demoralizing Shout"] = true,
+    ["Demoralizing Roar"] = true,
+    ["Faerie Fire"] = true,
+    ["Faerie Fire (Feral)"] = true,
+    ["Hamstring"] = true,
+}
+
+local function IsThreatCastAbility(spell)
+    if not spell then return false end
+    if THREAT_CAST_ABILITIES[spell] then return true end
+    local k
+    for k in pairs(THREAT_CAST_ABILITIES) do
+        if string.find(spell, k, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+function Parser:AddThreatCast(source, spell)
+    if not source or not spell then return end
+    if not IsThreatCastAbility(spell) then return end
+    source = ResolveSource(source)
+    if not source then return end
+    if not IsTracked(source) and not (OM.players and OM.players[source]) then return end
+
+    local function apply(seg)
+        if not seg then return end
+        local p = EnsurePlayer(seg, source)
+        if not p then return end
+        if not p.threatCasts then p.threatCasts = {} end
+        p.threatCasts[spell] = (p.threatCasts[spell] or 0) + 1
+    end
+    apply(OM.data and OM.data.current)
+    apply(OM.data and OM.data.overall)
 end
 
 function Parser:AddDamage(source, amount, spell, target)
@@ -1707,19 +1755,27 @@ local function IsDispelSpell(spell)
 end
 
 -- Dispel matching: combat log order is unreliable. The fade line can appear
--- before or after "X casts Purify". Keep short buffers of both and pair the
--- closest fade to each cast (prefer same target when known).
--- Direct "X removes Y from Z" lines always win and suppress nearby fade pairing.
+-- before or after "X casts Purify". Keep short buffers of both and pair them
+-- carefully so natural expirations are not counted as dispels.
+--
+-- Rules for cast↔fade pairing:
+--   1. Only pair fades of auras we previously saw applied as harmful
+--      ("X is afflicted by SPELL"). Friendly buffs / unknown fades are ignored.
+--   2. If the cast names a target, the fade must be on that same target.
+--   3. Direct "X removes Y from Z" lines always win and suppress nearby pairing.
 --
 -- Exception: PERIODIC_DISPEL_SPELLS (Abolish Disease/Poison, cleansing totems)
 -- never enter the cast↔fade pairing path. Their removals are only credited when
 -- the combat log explicitly names the ability as the remover.
-local PENDING_DISPEL_WINDOW = 0.5
+local PENDING_DISPEL_WINDOW = 0.45
+local HARMFUL_AURA_TTL = 180  -- remember afflictions this long for fade matching
 local recentDispelFades = {}  -- { { spell, target, time }, ... }
-local pendingDispelCasts = {} -- { { caster, target, time }, ... }
+local pendingDispelCasts = {} -- { { caster, target, time, spell }, ... }
 local lastDispelCastKey = nil -- "caster|spell" for de-dupe
 local lastDispelCastTime = 0
 local directDispelSuppressUntil = 0 -- ignore fade pairing briefly after a direct remove
+-- recentHarmfulAuras[targetName][spellName] = lastApplyTime
+local recentHarmfulAuras = {}
 
 -- Friendly/beneficial auras that should never be credited via cast↔fade pairing
 local FRIENDLY_AURAS = {
@@ -1795,6 +1851,71 @@ local function IsFriendlyAura(spell)
     return false
 end
 
+local function NoteHarmfulAura(target, spell)
+    target = NormalizeName(target)
+    if not target or not spell or spell == "" then return end
+    if IsFriendlyAura(spell) then return end
+    if not recentHarmfulAuras[target] then
+        recentHarmfulAuras[target] = {}
+    end
+    recentHarmfulAuras[target][spell] = GetTime()
+end
+
+local function ClearHarmfulAura(target, spell)
+    target = NormalizeName(target)
+    if not target or not recentHarmfulAuras[target] then return end
+    if spell then
+        recentHarmfulAuras[target][spell] = nil
+    else
+        recentHarmfulAuras[target] = nil
+    end
+end
+
+-- True if we saw this unit afflicted by this spell recently (and it was not friendly).
+local function IsTrackedHarmfulAura(target, spell)
+    target = NormalizeName(target)
+    if not target or not spell or spell == "" then return false end
+    if IsFriendlyAura(spell) then return false end
+    local byTarget = recentHarmfulAuras[target]
+    if not byTarget then return false end
+    local t = byTarget[spell]
+    if not t then
+        -- Partial match for rank suffixes ("Corruption" vs "Corruption Rank 5" rarely differs)
+        local k, applyT
+        for k, applyT in pairs(byTarget) do
+            if k == spell or string.find(spell, k, 1, true) or string.find(k, spell, 1, true) then
+                t = applyT
+                break
+            end
+        end
+    end
+    if not t then return false end
+    if (GetTime() - t) > HARMFUL_AURA_TTL then
+        byTarget[spell] = nil
+        return false
+    end
+    return true
+end
+
+local function PruneHarmfulAuras(now)
+    now = now or GetTime()
+    local target, spells
+    for target, spells in pairs(recentHarmfulAuras) do
+        local spell, t
+        local empty = true
+        for spell, t in pairs(spells) do
+            if (now - (t or 0)) > HARMFUL_AURA_TTL then
+                spells[spell] = nil
+            else
+                empty = false
+            end
+        end
+        if empty then
+            recentHarmfulAuras[target] = nil
+        end
+    end
+end
+
 local function PruneDispelBuffers(now)
     now = now or GetTime()
     local i
@@ -1808,6 +1929,7 @@ local function PruneDispelBuffers(now)
             table.remove(pendingDispelCasts, i)
         end
     end
+    PruneHarmfulAuras(now)
 end
 
 local function ClearDispelBuffers()
@@ -1823,17 +1945,27 @@ local function SuppressFadePairing()
     directDispelSuppressUntil = GetTime() + PENDING_DISPEL_WINDOW
 end
 
--- Score a fade/cast pair; lower is better. nil = out of window.
+-- Score a fade/cast pair; lower is better. nil = reject.
+-- If the cast named a target, the fade MUST be on that target.
 local function DispelPairScore(castTime, castTarget, fadeTime, fadeTarget)
     local dist = castTime - fadeTime
     if dist < 0 then dist = -dist end
     if dist > PENDING_DISPEL_WINDOW then return nil end
     local ct = castTarget and NormalizeName(castTarget) or nil
     local ft = fadeTarget and NormalizeName(fadeTarget) or nil
-    if ct and ft and ct == ft then
-        return dist - 0.25
+    if ct and ft then
+        if ct ~= ft then
+            return nil  -- hard reject: different unit
+        end
+        return dist  -- same target is required; no bonus needed
     end
-    return dist
+    -- Cast had no target (e.g. "You cast Dispel Magic.") — allow any unit,
+    -- but penalize so same-target pairs still win when both exist.
+    if not ct then
+        return dist + 0.15
+    end
+    -- Fade had no target (should be rare) — weak candidate
+    return dist + 0.20
 end
 
 local function NoteDispelCast(caster, target, spellName)
@@ -1859,11 +1991,13 @@ local function NoteDispelCast(caster, target, spellName)
 
     PruneDispelBuffers(now)
 
-    -- Match the closest buffered fade (may have arrived before the cast line)
+    -- Match the closest buffered fade that is a tracked harmful aura
+    -- (may have arrived before the cast line)
     local bestIdx, bestScore = nil, nil
     local i, fade
     for i, fade in ipairs(recentDispelFades) do
-        if not IsFriendlyAura(fade.spell) then
+        if fade.spell and not IsFriendlyAura(fade.spell)
+            and IsTrackedHarmfulAura(fade.target or target, fade.spell) then
             local score = DispelPairScore(now, target, fade.time, fade.target)
             if score and (not bestScore or score < bestScore) then
                 bestScore = score
@@ -1874,6 +2008,7 @@ local function NoteDispelCast(caster, target, spellName)
     if bestIdx then
         local fade = recentDispelFades[bestIdx]
         table.remove(recentDispelFades, bestIdx)
+        ClearHarmfulAura(fade.target or target, fade.spell)
         Parser:AddDispel(caster, fade.spell or "Unknown", fade.target or target)
         return
     end
@@ -1882,6 +2017,7 @@ local function NoteDispelCast(caster, target, spellName)
         caster = caster,
         target = target,
         time = now,
+        spell = spellName,
     })
 end
 
@@ -1901,6 +2037,13 @@ local function TryCreditPendingDispel(fadedSpell, target)
     local now = GetTime()
     PruneDispelBuffers(now)
 
+    -- Only consider fades of auras we actually saw applied as harmful.
+    -- This is the main guard against pairing a dispel cast with a random
+    -- natural expiration (DoT tick-end, buff drop, etc.).
+    if not IsTrackedHarmfulAura(target, fadedSpell) then
+        return false
+    end
+
     local bestIdx, bestScore = nil, nil
     local i, cast
     for i, cast in ipairs(pendingDispelCasts) do
@@ -1913,10 +2056,12 @@ local function TryCreditPendingDispel(fadedSpell, target)
     if bestIdx then
         local cast = pendingDispelCasts[bestIdx]
         table.remove(pendingDispelCasts, bestIdx)
+        ClearHarmfulAura(target, fadedSpell)
         Parser:AddDispel(cast.caster, fadedSpell, target or cast.target)
         return true
     end
 
+    -- Buffer only harmful tracked fades so a slightly later cast can claim them
     table.insert(recentDispelFades, {
         spell = fadedSpell,
         target = target,
@@ -2029,6 +2174,7 @@ local function ParseDispelMessage(message)
     local _, _, removed, target = string.find(message, "^You remove (.+) from (.+)%.?$")
     if removed and target then
         Parser:AddDispel(playerName, removed, target)
+        if ClearHarmfulAura then ClearHarmfulAura(target, removed) end
         SuppressFadePairing()
         return true
     end
@@ -2049,6 +2195,7 @@ local function ParseDispelMessage(message)
     if source and sourceSpell and removed2 and target3 then
         if IsDispelSpell(sourceSpell) then
             Parser:AddDispel(source, removed2, target3)
+            if ClearHarmfulAura then ClearHarmfulAura(target3, removed2) end
             SuppressFadePairing()
             return true
         end
@@ -2059,6 +2206,7 @@ local function ParseDispelMessage(message)
     if source2 and removed3 and target4 then
         if source2 ~= "You" and not string.find(source2, "^Your ") then
             Parser:AddDispel(source2, removed3, target4)
+            if ClearHarmfulAura then ClearHarmfulAura(target4, removed3) end
             SuppressFadePairing()
             return true
         end
@@ -2199,11 +2347,27 @@ local function ParseCCMessage(message)
         return false
     end
 
+    -- Self form: "You are afflicted by SPELL."
+    local _, _, selfSpell = string.find(message, "^You are afflicted by (.+)%.?$")
+    if selfSpell then
+        if NoteHarmfulAura then NoteHarmfulAura(playerName, selfSpell) end
+        local dur = GetHardCCDuration(selfSpell)
+        if dur then
+            Parser:AddEnemyCC(selfSpell, playerName, dur)
+            return true
+        end
+        return false
+    end
+
     -- Primary form (no caster): "TARGET is afflicted by SPELL."
     local _, _, target, spell = string.find(message, "^(.+) is afflicted by (.+)%.?$")
     if target and spell then
         if target == "you" or target == "You" then
             target = playerName
+        end
+        -- Always record harmful applications for dispel fade pairing
+        if NoteHarmfulAura then
+            NoteHarmfulAura(target, spell)
         end
         local dur = GetHardCCDuration(spell)
         if dur then
@@ -2216,6 +2380,7 @@ local function ParseCCMessage(message)
     -- "You afflict TARGET with SPELL."
     local _, _, target2, spell2 = string.find(message, "^You afflict (.+) with (.+)%.?$")
     if target2 and spell2 then
+        if NoteHarmfulAura then NoteHarmfulAura(target2, spell2) end
         local dur = GetHardCCDuration(spell2)
         if dur then
             Parser:AddEnemyCC(spell2, target2, dur)
@@ -2228,6 +2393,7 @@ local function ParseCCMessage(message)
     local _, _, source, target3, spell3 = string.find(message, "^(.+) afflicts (.+) with (.+)%.?$")
     if source and target3 and spell3 then
         if source ~= "Your" and not string.find(source, "^Your ") then
+            if NoteHarmfulAura then NoteHarmfulAura(target3, spell3) end
             local dur = GetHardCCDuration(spell3)
             if dur then
                 Parser:AddEnemyCC(spell3, target3, dur)
@@ -2753,6 +2919,46 @@ local function ParseMessage(event, message)
         end
     end
 
+    -- Non-damaging threat abilities: "X casts/performs Sunder Armor on Y"
+    if string.find(message, "Sunder Armor", 1, true)
+        or string.find(message, "Demoralizing Shout", 1, true)
+        or string.find(message, "Demoralizing Roar", 1, true)
+        or string.find(message, "Faerie Fire", 1, true)
+        or string.find(message, "Hamstring", 1, true) then
+        local src, spell
+        local _
+        _, _, spell = string.find(message, "^You perform (.+) on ")
+        if spell then
+            Parser:AddThreatCast(playerName, spell)
+        else
+            _, _, spell = string.find(message, "^You cast (.+) on ")
+            if spell then
+                Parser:AddThreatCast(playerName, spell)
+            else
+                _, _, spell = string.find(message, "^You cast (.+)%.?$")
+                if spell then
+                    Parser:AddThreatCast(playerName, spell)
+                else
+                    _, _, src, spell = string.find(message, "^(.+) performs (.+) on ")
+                    if src and spell then
+                        Parser:AddThreatCast(src, spell)
+                    else
+                        _, _, src, spell = string.find(message, "^(.+) casts (.+) on ")
+                        if src and spell then
+                            Parser:AddThreatCast(src, spell)
+                        else
+                            _, _, src, spell = string.find(message, "^(.+) casts (.+)%.?$")
+                            if src and spell then
+                                Parser:AddThreatCast(src, spell)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- do not return — message may still carry other useful patterns
+    end
+
     -- Plain-text reflection
     if string.find(message, "reflect", 1, true) or string.find(message, "Reflect", 1, true) then
         if ParseReflectMessage(message) then
@@ -2992,6 +3198,7 @@ function Parser:OnCombatStart()
     fightIsBoss = false
     fightBossName = nil
     ClearDispelBuffers()
+    recentHarmfulAuras = {}
     OM.data.current = {
         players = {},
         ccTargets = {},

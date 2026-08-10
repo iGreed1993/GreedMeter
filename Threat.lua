@@ -102,7 +102,7 @@ Threat.tankName            = nil
 Threat.queryInterval       = 0.55
 Threat.lastQuery           = 0
 Threat.history             = {}   -- for TPS
-Threat.estimateHistory     = {}   -- sliding window samples for estimation
+Threat.groupCombat         = false -- party/raid combat session (not just local regen)
 
 -- Improved class baseline modifiers (relative threat generation)
 -- Tanks higher, pure DPS lower, healers lowest base on damage contribution
@@ -118,6 +118,62 @@ local CLASS_THREAT_MOD = {
     SHAMAN  = 0.75,
 }
 
+-- Damage abilities with higher-than-normal threat coefficients (1.12 approximations).
+-- Applied to that spell's damage already stored in the meter (damageSpells).
+local SPELL_DAMAGE_THREAT_MULT = {
+    ["Mind Blast"] = 2.00,
+    ["Searing Pain"] = 2.00,
+    ["Shield Slam"] = 1.50,
+    ["Revenge"] = 2.00,
+    ["Maul"] = 1.75,
+    ["Heroic Strike"] = 1.25,
+    ["Cleave"] = 1.15,
+    ["Thunder Clap"] = 1.75,
+    ["Mocking Blow"] = 2.50,
+    ["Holy Shield"] = 1.30,
+    ["Lacerate"] = 1.30,
+    ["Devastate"] = 1.50,
+}
+
+-- Non-damaging (or mostly non-damaging) threat applications.
+-- Values are flat threat per successful application/cast (classic-era approximations).
+local SPELL_FLAT_THREAT = {
+    ["Sunder Armor"] = 261,
+    ["Demoralizing Shout"] = 43,
+    ["Demoralizing Roar"] = 39,
+    ["Faerie Fire"] = 108,
+    ["Faerie Fire (Feral)"] = 108,
+    ["Hamstring"] = 104,
+    ["Rank 1"] = 0, -- placeholder ignored; matches use exact keys via SpellThreatFlat()
+}
+
+local function SpellDamageThreatMult(spell)
+    if not spell or spell == "" then return 1.0 end
+    local m = SPELL_DAMAGE_THREAT_MULT[spell]
+    if m then return m end
+    -- Partial match for ranks / variants ("Mind Blast(Rank 5)", "Sunder Armor Rank 5")
+    local key, mult
+    for key, mult in pairs(SPELL_DAMAGE_THREAT_MULT) do
+        if string.find(spell, key, 1, true) then
+            return mult
+        end
+    end
+    return 1.0
+end
+
+local function SpellFlatThreat(spell)
+    if not spell or spell == "" then return 0 end
+    local v = SPELL_FLAT_THREAT[spell]
+    if v and v > 0 then return v end
+    local key, flat
+    for key, flat in pairs(SPELL_FLAT_THREAT) do
+        if flat > 0 and string.find(spell, key, 1, true) then
+            return flat
+        end
+    end
+    return 0
+end
+
 -- Threat-reducing buffs we can detect on the local player (name patterns)
 local THREAT_REDUCE_BUFFS = {
     ["Blessing of Salvation"] = 0.70,
@@ -131,6 +187,34 @@ local THREAT_REDUCE_BUFFS = {
 local function IsInGroup()
     return (GetNumRaidMembers() and GetNumRaidMembers() > 0)
         or (GetNumPartyMembers() and GetNumPartyMembers() > 0)
+end
+
+-- True if the player OR any party/raid member is in combat.
+-- Healers often leave themselves out of combat; overall threat still needs to run.
+local function IsGroupInCombat()
+    if UnitAffectingCombat("player") then
+        return true
+    end
+    local i
+    local nParty = GetNumPartyMembers() or 0
+    for i = 1, nParty do
+        if UnitExists("party" .. i) and UnitAffectingCombat("party" .. i) then
+            return true
+        end
+    end
+    local nRaid = GetNumRaidMembers() or 0
+    for i = 1, nRaid do
+        if UnitExists("raid" .. i) and UnitAffectingCombat("raid" .. i) then
+            return true
+        end
+    end
+    return false
+end
+
+local function HasHostileTarget()
+    if not UnitExists("target") then return false end
+    if UnitIsPlayer("target") or UnitIsFriend("player", "target") then return false end
+    return true
 end
 
 local function GetPlayerClass(name)
@@ -556,56 +640,84 @@ function Threat:AddPullAggroRow()
 end
 
 -- ============================================================
--- Improved 1.12 estimation fallback (party/raid only)
+-- 1.12 estimation fallback (party/raid only)
+-- Uses the damage meter segment only — no second pass over combat log
+-- and no parallel damage/heal sample buffers.
 -- ============================================================
 
-local ESTIMATE_WINDOW = 8.0   -- seconds of recent activity to weight
-
-local function RecordEstimateSample()
-    if not UI or not UI.GetSegmentData then return end
-    local segment = UI.GetSegmentData("current")
-    if not segment or not segment.players then return end
-
+local function SegmentDuration(segment)
+    if not segment or not segment.startTime or segment.startTime <= 0 then
+        return 0
+    end
+    local endT = segment.endTime or 0
     local now = GetTime()
-    local name, data
-    for name, data in pairs(segment.players) do
-        local dmg = data.damage or 0
-        local heal = data.healing or 0
-        local hist = Threat.estimateHistory[name]
-        if not hist then
-            Threat.estimateHistory[name] = {
-                lastDmg = dmg,
-                lastHeal = heal,
-                samples = {},
-            }
-            hist = Threat.estimateHistory[name]
+    local dur
+    if endT and endT > segment.startTime then
+        dur = endT - segment.startTime
+    else
+        dur = now - segment.startTime
+    end
+    -- Prefer trimmed activity window when the meter recorded it
+    local lastAct = segment.lastActivityTime
+    if lastAct and lastAct >= segment.startTime and lastAct <= now then
+        local trimmed = lastAct - segment.startTime
+        if trimmed > 0 and (dur <= 0 or trimmed < dur) then
+            dur = trimmed
         end
+    end
+    if dur < 1 then dur = 1 end
+    return dur
+end
 
-        local dDmg = dmg - (hist.lastDmg or 0)
-        local dHeal = heal - (hist.lastHeal or 0)
-        if dDmg < 0 then dDmg = 0 end
-        if dHeal < 0 then dHeal = 0 end
-        hist.lastDmg = dmg
-        hist.lastHeal = heal
+-- Classic-style relative threat from meter totals already parsed by GreedMeter.
+local function ThreatFromMeterPlayer(name, data, me, localMod)
+    if not data then return 0, nil end
+    local class = data.class or GetPlayerClass(name)
+    local mod = 1.0
+    if class and CLASS_THREAT_MOD[class] then
+        mod = CLASS_THREAT_MOD[class]
+    end
+    if me and name == me then
+        mod = mod * (localMod or 1.0)
+    end
 
-        if dDmg > 0 or dHeal > 0 then
-            table.insert(hist.samples, {
-                t = now,
-                dmg = dDmg,
-                heal = dHeal,
-            })
+    -- Damage threat: prefer per-spell totals so high-threat abilities can be weighted.
+    -- Meter already parsed these once into data.damage / data.damageSpells.
+    local dmgThreat = 0
+    local accounted = 0
+    if data.damageSpells then
+        local spell, amt
+        for spell, amt in pairs(data.damageSpells) do
+            amt = amt or 0
+            dmgThreat = dmgThreat + amt * SpellDamageThreatMult(spell)
+            accounted = accounted + amt
         end
+    end
+    local totalDmg = data.damage or 0
+    local rest = totalDmg - accounted
+    if rest > 0 then
+        dmgThreat = dmgThreat + rest
+    elseif accounted <= 0 then
+        dmgThreat = totalDmg
+    end
 
-        -- Prune old samples
-        local pruned = {}
-        local i
-        for i = 1, table.getn(hist.samples) do
-            if (now - hist.samples[i].t) <= ESTIMATE_WINDOW then
-                table.insert(pruned, hist.samples[i])
+    -- Healing threat (~0.5x effective heal — parser stores effective in data.healing)
+    local healThreat = (data.healing or 0) * 0.5
+
+    -- Flat threat from non-damaging applications (Sunder, Demo Shout, etc.)
+    local flatThreat = 0
+    if data.threatCasts then
+        local spell, count
+        for spell, count in pairs(data.threatCasts) do
+            count = count or 0
+            if count > 0 then
+                flatThreat = flatThreat + count * SpellFlatThreat(spell)
             end
         end
-        hist.samples = pruned
     end
+
+    local threat = (dmgThreat + healThreat + flatThreat) * mod
+    return threat, class
 end
 
 local function BuildEstimatedThreat()
@@ -613,15 +725,12 @@ local function BuildEstimatedThreat()
     Threat.usingApi = false
     Threat.targetName = UnitName("target")
 
-    -- Estimation only functions in party/raid (same gate as the live API)
     if not IsInGroup() then
         return
     end
-    if not UnitExists("target") or UnitIsPlayer("target") or UnitIsFriend("player", "target") then
+    if not HasHostileTarget() then
         return
     end
-
-    RecordEstimateSample()
 
     if not UI or not UI.GetSegmentData then return end
     local segment = UI.GetSegmentData("current")
@@ -633,50 +742,17 @@ local function BuildEstimatedThreat()
         localMod = GetLocalThreatModifier()
     end
 
-    -- Is the local player currently the mob's target? (likely tanking)
+    -- Small bias when we are the mob's current target (likely tanking)
     local iAmTanking = UnitExists("targettarget") and UnitIsUnit("player", "targettarget")
 
     local maxThreat = 0
     local list = {}
     local name, data
     for name, data in pairs(segment.players) do
-        local class = data.class or GetPlayerClass(name)
-        local mod = 1.0
-        if class and CLASS_THREAT_MOD[class] then
-            mod = CLASS_THREAT_MOD[class]
+        local threat, class = ThreatFromMeterPlayer(name, data, me, localMod)
+        if name == me and iAmTanking then
+            threat = threat * 1.15
         end
-        if name == me then
-            mod = mod * localMod
-            if iAmTanking then
-                mod = mod * 1.15   -- small bias when we are the current target
-            end
-        end
-
-        -- Prefer recent window contribution; fall back to full-fight totals
-        local recentDmg, recentHeal = 0, 0
-        local hist = Threat.estimateHistory[name]
-        if hist and hist.samples and table.getn(hist.samples) > 0 then
-            local i
-            for i = 1, table.getn(hist.samples) do
-                recentDmg = recentDmg + (hist.samples[i].dmg or 0)
-                recentHeal = recentHeal + (hist.samples[i].heal or 0)
-            end
-        end
-
-        local useDmg, useHeal
-        if recentDmg > 0 or recentHeal > 0 then
-            -- Scale recent activity up so bars feel responsive, blend with totals
-            local totalDmg = data.damage or 0
-            local totalHeal = data.healing or 0
-            useDmg = recentDmg * 2.5 + totalDmg * 0.15
-            useHeal = recentHeal * 2.5 + totalHeal * 0.15
-        else
-            useDmg = data.damage or 0
-            useHeal = data.healing or 0
-        end
-
-        -- Classic: damage 1:1, healing 0.5:1
-        local threat = (useDmg + useHeal * 0.5) * mod
         if threat > 0 then
             table.insert(list, {
                 name = name,
@@ -688,9 +764,8 @@ local function BuildEstimatedThreat()
         end
     end
 
-    -- Also consider targettarget as tank if they are in the list
     local ttName = UnitExists("targettarget") and UnitName("targettarget") or nil
-
+    local duration = SegmentDuration(segment)
     local i
     for i = 1, table.getn(list) do
         local e = list[i]
@@ -701,11 +776,15 @@ local function BuildEstimatedThreat()
         local isTank = e.isLikelyTank
             or (ttName and e.name == ttName)
             or (perc >= 100 and maxThreat > 0 and e.threat >= maxThreat)
+        local tps = 0
+        if duration > 0 then
+            tps = e.threat / duration
+        end
         Threat.threats[e.name] = {
             threat    = e.threat,
             perc      = perc,
             tank      = isTank,
-            tps       = 0,
+            tps       = tps,
             melee     = false,
             class     = e.class,
             estimated = true,
@@ -717,6 +796,40 @@ local function BuildEstimatedThreat()
 
     Threat:AddPullAggroRow()
     Threat:UpdateOverallFromPlayerThreats()
+end
+
+-- Overall rankings with no personal target — still only meter totals.
+local function BuildEstimatedOverallOnly()
+    if not IsInGroup() then return end
+    if not UI or not UI.GetSegmentData then return end
+
+    local segment = UI.GetSegmentData("current")
+    if not segment or not segment.players then return end
+
+    local me = UnitName("player")
+    local localMod = 1.0
+    if me then
+        localMod = GetLocalThreatModifier()
+    end
+    local duration = SegmentDuration(segment)
+
+    local name, data
+    for name, data in pairs(segment.players) do
+        local threat, class = ThreatFromMeterPlayer(name, data, me, localMod)
+        if threat > 0 then
+            local tps = 0
+            if duration > 0 then
+                tps = threat / duration
+            end
+            Threat.overallThreat[name] = {
+                threat    = threat,
+                class     = class,
+                estimated = true,
+                tank      = false,
+                tps       = tps,
+            }
+        end
+    end
 end
 
 -- ============================================================
@@ -935,6 +1048,7 @@ function Threat:UpdateOverallFromPlayerThreats()
                 class     = data.class or GetPlayerClass(name),
                 estimated = data.estimated,
                 tank      = data.tank,
+                tps       = data.tps or 0,
             }
         end
     end
@@ -1028,7 +1142,7 @@ function Threat:BuildOverallList(hiddenNames)
                         threat         = value,
                         perc           = 0,
                         tank           = data.tank,
-                        tps            = 0,
+                        tps            = data.tps or 0,
                         class          = data.class,
                         estimated      = data.estimated,
                         isOverall      = true,
@@ -1194,18 +1308,54 @@ local function FormatThreatSecondary(data)
         return text
     end
 
-    -- Overall fight threat — parentheses show # of enemies currently targeting them
+    -- Overall fight threat (respects Customization column toggles)
     if data.isOverall then
-        local threat = data.threat or 0
-        local count = data.targetedByCount or 0
-        local text
-        if UI.FormatNumber then
-            text = UI.FormatNumber(threat)
-        else
-            text = tostring(math.floor(threat + 0.5))
+        local function show(key)
+            if UI.GetColumnSetting then
+                return UI.GetColumnSetting("overall", key)
+            end
+            -- Fallbacks if helpers not loaded yet
+            if key == "share" or key == "rate" then return false end
+            return true
         end
-        text = text .. " (" .. tostring(count) .. ")"
-        if data.estimated then text = text .. "*" end
+
+        local threat = data.threat or 0
+        local perc   = data.perc or 0
+        local tps    = data.tps or 0
+        local count  = data.targetedByCount or 0
+        local text   = ""
+
+        if show("amount") then
+            if UI.FormatNumber then
+                text = UI.FormatNumber(threat)
+            else
+                text = tostring(math.floor(threat + 0.5))
+            end
+        end
+
+        if show("share") then
+            text = text .. " (" .. tostring(math.floor(perc + 0.5)) .. "%)"
+        end
+
+        if show("rate") and tps and tps > 0 then
+            if UI.FormatNumber then
+                text = text .. " " .. UI.FormatNumber(tps)
+            else
+                text = text .. " " .. string.format("%.0f", tps)
+            end
+        end
+
+        -- "Targeted by" — enemy count in parentheses (was always on before)
+        if show("targeted") then
+            text = text .. " (" .. tostring(count) .. ")"
+        end
+
+        if data.estimated then
+            text = text .. "*"
+        end
+        if text == "" or text == "*" then
+            return "0"
+        end
         return text
     end
 
@@ -2237,10 +2387,24 @@ eventFrame:SetScript("OnUpdate", function()
     end
 
     local now = GetTime()
+    local groupCombat = IsGroupInCombat()
+    local hostileTarget = HasHostileTarget()
 
-    -- Live API path (party/raid + valid hostile target)
-    if IsInGroup() and UnitExists("target")
-        and not UnitIsPlayer("target") and not UnitIsFriend("player", "target") then
+    -- Group combat session: start/stop with the party, not only local regen.
+    -- Prevents late-combat healers from wiping overall data on their own REGON_DISABLED.
+    if groupCombat and not Threat.groupCombat then
+        Threat.groupCombat = true
+        local k
+        for k in pairs(Threat.overallThreat) do
+            Threat.overallThreat[k] = nil
+        end
+        Threat.usingApi = false
+    elseif not groupCombat and Threat.groupCombat then
+        Threat.groupCombat = false
+    end
+
+    -- Live API path still needs a hostile target (server API is target-scoped)
+    if IsInGroup() and hostileTarget then
         if (now - Threat.lastQuery) >= Threat.queryInterval then
             Threat.lastQuery = now
             SendThreatQuery()
@@ -2252,8 +2416,16 @@ eventFrame:SetScript("OnUpdate", function()
     end
 
     if not Threat.usingApi then
-        -- Estimation also gated to party/raid inside BuildEstimatedThreat
-        BuildEstimatedThreat()
+        if hostileTarget then
+            -- Single-target estimate (also feeds overall via UpdateOverallFromPlayerThreats)
+            BuildEstimatedThreat()
+        elseif IsInGroup() and (groupCombat or Threat.groupCombat) then
+            -- No target: still keep overall rankings alive for healers / untargeted players
+            BuildEstimatedOverallOnly()
+        end
+    elseif IsInGroup() and not hostileTarget and (groupCombat or Threat.groupCombat) then
+        -- API data was for a previous target; keep overall moving without a target
+        BuildEstimatedOverallOnly()
     end
 
     if UI.Refresh then
@@ -2346,14 +2518,12 @@ function Threat:OnCombatStart()
     if not OM:GetSetting("enableThreatMode") then return end
     -- Don't wipe test data when "combat" starts while testing
     if OM:GetSetting("testMode") then return end
+    -- Single-target snapshot resets on local combat entry.
+    -- overallThreat is owned by the group-combat session in OnUpdate so a
+    -- healer entering combat mid-fight does not wipe the whole meter.
     ClearThreatTable()
     ClearTankModeTable()
-    local k
-    for k in pairs(Threat.overallThreat) do
-        Threat.overallThreat[k] = nil
-    end
     Threat.usingApi = false
-    Threat.estimateHistory = {}
     Threat.testDataActive = false
 end
 
@@ -2373,7 +2543,6 @@ function Threat:OnReset()
         Threat.overallThreat[k] = nil
     end
     Threat.history = {}
-    Threat.estimateHistory = {}
     Threat.usingApi = false
     Threat.testDataActive = false
 end

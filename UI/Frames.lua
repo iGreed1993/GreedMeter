@@ -1042,7 +1042,7 @@ function UI:RefreshFrame(f)
     -- Total for share %: full segment (including filtered names) so hiding
     -- someone does not inflate everyone else's percentage.
     local metricTotal = 0
-    if mode == "damage" or mode == "healing" then
+    if mode == "damage" or mode == "healing" or mode == "taken" then
         if segment and segment.players then
             local n, d
             for n, d in pairs(segment.players) do

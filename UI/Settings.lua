@@ -772,9 +772,10 @@ local MODE_COLUMN_OPTIONS = {
         mode = "overall",
         label = "Overall Threat",
         columns = {
-            { key = "amount", label = "Threat" },
-            { key = "share",  label = "Share %" },
-            { key = "rate",   label = "TPS" },
+            { key = "amount",   label = "Threat" },
+            { key = "share",    label = "Share %" },
+            { key = "rate",     label = "TPS" },
+            { key = "targeted", label = "Targeted by" },
         },
         threatOnly = true,
     },
@@ -1444,6 +1445,7 @@ local function CreateCustomizationFrame()
                 elseif col.label == "Healing" then labelW = 50
                 elseif col.label == "Damage" then labelW = 50
                 elseif col.label == "Threat" then labelW = 46
+                elseif col.label == "Targeted by" then labelW = 72
                 end
                 x = x + cbSize + labelW
             end
