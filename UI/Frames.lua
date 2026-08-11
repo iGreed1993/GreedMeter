@@ -35,6 +35,69 @@ local CloseDropdown = UI.CloseDropdown
 local ShowDropdown = UI.ShowDropdown
 local ShowBarTooltip = UI.ShowBarTooltip
 
+
+-- ============================================================
+-- Position clamping (no clamp-during-drag)
+--
+-- Some modded 1.12 clients (notably 4K + SuperWoW/Nampower) native-crash
+-- with ACCESS_VIOLATION #132 when StartMoving() runs on a frame that has
+-- SetClampedToScreen(true). Meter frames never use SetClampedToScreen.
+--
+-- We clamp in Lua after drag, after layout restore, and before saving so
+-- positions stay on-screen across resolution/scale changes too.
+-- ============================================================
+
+local function ClampFrameToScreen(f)
+    if not f or not f.GetLeft then return end
+    local left = f:GetLeft()
+    local bottom = f:GetBottom()
+    local width = f:GetWidth()
+    local height = f:GetHeight()
+    if not left or not bottom or not width or not height then return end
+
+    local parent = UIParent
+    local pw = parent:GetWidth()
+    local ph = parent:GetHeight()
+    if not pw or not ph or pw <= 0 or ph <= 0 then return end
+
+    -- Keep a grab-able strip on-screen even if the user dragged mostly off
+    local minVisible = 24
+    if width < minVisible then minVisible = width end
+    if height < minVisible then minVisible = height end
+
+    local newLeft, newBottom = left, bottom
+    if newLeft + width < minVisible then newLeft = minVisible - width end
+    if newLeft > pw - minVisible then newLeft = pw - minVisible end
+    if newBottom + height < minVisible then newBottom = minVisible - height end
+    if newBottom > ph - minVisible then newBottom = ph - minVisible end
+
+    if newLeft ~= left or newBottom ~= bottom then
+        f:ClearAllPoints()
+        f:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", newLeft, newBottom)
+    end
+end
+
+local function SafeStartMoving(f)
+    if not f then return end
+    if f.SetClampedToScreen then
+        f:SetClampedToScreen(false)
+    end
+    f._greedMeterDragging = true
+    f:StartMoving()
+end
+
+local function SafeStopMoving(f)
+    if not f then return end
+    if f.IsMoving and f:IsMoving() then
+        f:StopMovingOrSizing()
+    else
+        -- Still stop in case IsMoving is unavailable on some clients
+        f:StopMovingOrSizing()
+    end
+    f._greedMeterDragging = nil
+    ClampFrameToScreen(f)
+end
+
 function UI:SaveAllFrameLayouts()
     if not OM.GetLayoutDB then return end
     local layoutDB = OM:GetLayoutDB()
@@ -43,6 +106,8 @@ function UI:SaveAllFrameLayouts()
     local i, f
     for i, f in ipairs(self.frames) do
         if f and f:GetLeft() then
+            -- Sanitize before persist (resolution changes, partial off-screen, etc.)
+            ClampFrameToScreen(f)
             local point, _, relativePoint, x, y = f:GetPoint(1)
             local entry = {
                 point = point or "CENTER",
@@ -77,7 +142,41 @@ function UI:ApplySavedLayout(f, index)
     end
     f:ClearAllPoints()
     f:SetPoint(saved.point or "CENTER", UIParent, saved.relativePoint or "CENTER", saved.x or 0, saved.y or 0)
+    ClampFrameToScreen(f)
     return true
+end
+
+-- Restore all meter windows to a centered cascade (and center settings/customization).
+-- Useful when a window ends up off-screen after resolution/scale changes.
+function UI:ResetFramePositions()
+    local i, f
+    if self.frames then
+        for i, f in ipairs(self.frames) do
+            if f then
+                f:ClearAllPoints()
+                local offset = (i - 1) * 30
+                f:SetPoint("CENTER", UIParent, "CENTER", offset, offset)
+                if ClampFrameToScreen then
+                    ClampFrameToScreen(f)
+                end
+                f:Show()
+            end
+        end
+    end
+
+    if self.settingsFrame then
+        self.settingsFrame:ClearAllPoints()
+        self.settingsFrame:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
+    end
+
+    if self.customizationFrame then
+        self.customizationFrame:ClearAllPoints()
+        self.customizationFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    end
+
+    if self.SaveAllFrameLayouts then
+        self:SaveAllFrameLayouts()
+    end
 end
 
 
@@ -285,7 +384,9 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
     end
 
     local name = "GreedMeterFrame"..id
-    local f = CreateFrame("Frame", name, UIParent)
+    
+
+local f = CreateFrame("Frame", name, UIParent)
     f:SetWidth(fw)
     f:SetHeight(fh)
     f:SetBackdrop({
@@ -302,13 +403,19 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
     f:SetScript("OnDragStart", function()
         if FramesLocked() then return end
         CloseDropdown()
-        this:StartMoving()
+        SafeStartMoving(this)
     end)
     f:SetScript("OnDragStop", function()
-        this:StopMovingOrSizing()
+        SafeStopMoving(this)
         UI:SaveAllFrameLayouts()
     end)
-    f:SetClampedToScreen(true)
+    -- If the frame is hidden mid-drag (party change, etc.), finish the move cleanly
+    f:SetScript("OnHide", function()
+        if this._greedMeterDragging then
+            SafeStopMoving(this)
+        end
+    end)
+    -- SetClampedToScreen avoided (unsafe with StartMoving on some clients)
 
     f.frameId = id
     f.layoutIndex = layoutIndex
@@ -542,10 +649,10 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
     barParent:SetScript("OnDragStart", function()
         if FramesLocked() then return end
         CloseDropdown()
-        f:StartMoving()
+        SafeStartMoving(f)
     end)
     barParent:SetScript("OnDragStop", function()
-        f:StopMovingOrSizing()
+        SafeStopMoving(f)
         UI:SaveAllFrameLayouts()
     end)
     barParent:SetScript("OnMouseWheel", function()
@@ -607,10 +714,10 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
         bar:SetScript("OnDragStart", function()
             if FramesLocked() then return end
             CloseDropdown()
-            f:StartMoving()
+            SafeStartMoving(f)
         end)
         bar:SetScript("OnDragStop", function()
-            f:StopMovingOrSizing()
+            SafeStopMoving(f)
             UI:SaveAllFrameLayouts()
         end)
         bar:SetScript("OnEnter", function()

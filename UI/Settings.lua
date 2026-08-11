@@ -169,7 +169,7 @@ function UI:CreateSettingsFrame()
 
     local f = CreateFrame("Frame", "GreedMeterSettings", UIParent)
     f:SetWidth(460)
-    f:SetHeight(340)
+    f:SetHeight(360)
     f:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
     f:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -182,8 +182,28 @@ function UI:CreateSettingsFrame()
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", function() this:StartMoving() end)
-    f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+    f:SetScript("OnDragStart", function()
+        if this.SetClampedToScreen then this:SetClampedToScreen(false) end
+        this:StartMoving()
+    end)
+    f:SetScript("OnDragStop", function()
+        this:StopMovingOrSizing()
+        local left, bottom = this:GetLeft(), this:GetBottom()
+        local width, height = this:GetWidth(), this:GetHeight()
+        if left and bottom and width and height then
+            local pw, ph = UIParent:GetWidth(), UIParent:GetHeight()
+            local nl, nb = left, bottom
+            if nl < 4 then nl = 4 end
+            if nb < 4 then nb = 4 end
+            if nl + width > pw - 4 then nl = pw - 4 - width end
+            if nb + height > ph - 4 then nb = ph - 4 - height end
+            if nl ~= left or nb ~= bottom then
+                this:ClearAllPoints()
+                this:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", nl, nb)
+            end
+        end
+        if this.SetClampedToScreen then this:SetClampedToScreen(true) end
+    end)
     f:SetFrameStrata("DIALOG")
     f:SetClampedToScreen(true)
 
@@ -220,7 +240,28 @@ function UI:CreateSettingsFrame()
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Layout is now per-character.")
         end
     end
-    y = y - 24
+    y = y - 26
+    local resetPosBtn = CreateButton(f, "Reset Window Positions", 160, 20, function()
+        if UI.ResetFramePositions then
+            UI:ResetFramePositions()
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Window positions restored to center.")
+        end
+    end)
+    resetPosBtn:ClearAllPoints()
+    resetPosBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y)
+    if resetPosBtn.SetScript then
+        -- tooltip
+        resetPosBtn:SetScript("OnEnter", function()
+            GameTooltip:SetOwner(resetPosBtn, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Reset Window Positions", 1, 1, 1)
+            GameTooltip:AddLine("Moves all meter windows back to the center of the screen", 0.8, 0.8, 0.8, 1)
+            GameTooltip:AddLine("(cascaded slightly so multiple windows stay visible).", 0.8, 0.8, 0.8, 1)
+            GameTooltip:AddLine("Also recenters the settings window.", 0.8, 0.8, 0.8, 1)
+            GameTooltip:Show()
+        end)
+        resetPosBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+    y = y - 26
     AddCheckbox(f, "Confirm before reset", 16, y, "confirmReset", "Show a confirmation popup when pressing Reset")
     y = y - 24
     AddCheckbox(f, "Confirm before announce", 16, y, "confirmAnnounce", "Show a confirmation popup when pressing Announce")
@@ -243,6 +284,7 @@ function UI:CreateSettingsFrame()
             end
             if OM.UpdateGroupRoster then OM:UpdateGroupRoster() end
             OM:Fire("OnReset")
+            if UI.Refresh then UI:Refresh() end
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Test mode OFF")
         end
     end
@@ -1246,8 +1288,28 @@ local function CreateCustomizationFrame()
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", function() this:StartMoving() end)
-    f:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+    f:SetScript("OnDragStart", function()
+        if this.SetClampedToScreen then this:SetClampedToScreen(false) end
+        this:StartMoving()
+    end)
+    f:SetScript("OnDragStop", function()
+        this:StopMovingOrSizing()
+        local left, bottom = this:GetLeft(), this:GetBottom()
+        local width, height = this:GetWidth(), this:GetHeight()
+        if left and bottom and width and height then
+            local pw, ph = UIParent:GetWidth(), UIParent:GetHeight()
+            local nl, nb = left, bottom
+            if nl < 4 then nl = 4 end
+            if nb < 4 then nb = 4 end
+            if nl + width > pw - 4 then nl = pw - 4 - width end
+            if nb + height > ph - 4 then nb = ph - 4 - height end
+            if nl ~= left or nb ~= bottom then
+                this:ClearAllPoints()
+                this:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", nl, nb)
+            end
+        end
+        if this.SetClampedToScreen then this:SetClampedToScreen(true) end
+    end)
 
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOP", f, "TOP", 0, -10)

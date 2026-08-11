@@ -2,7 +2,7 @@
 ## Title: GreedMeter by |cffffd700iGreed|r
 ## Notes: Lightweight combat meter for Vanilla 1.12 (Damage, Healing, Dispels, Interrupts, CC, Damage Taken, and more)
 ## Author: iGreed
-## Version: 1.2.1
+## Version: 1.2.2
 ## SavedVariables: GreedMeterDB
 ## SavedVariablesPerCharacter: GreedMeterCharDB
 

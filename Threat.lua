@@ -1,21 +1,9 @@
 --[[
     GreedMeter - Threat module
-    Drop-in file that adds an optional "Threat" mode (and optional Tank mode).
 
-    - Settings checkbox: "Add threat mode"
-        - Child checkbox: "Tank mode" (indented, enabled only when parent is on)
-    - Threat mode (default): player threat on current target, Pull Aggro threshold,
-      % of MT — uses Turtle API when present, else 1.12 estimation (party/raid only)
-    - Tank mode: lists enemies you are in combat with, ordered by your threat on them
-      (lowest first). Bar colors: red = you do not have aggro, yellow = contested,
-      green = solid lead. Click a bar to target that enemy.
-    - Extra checkboxes register through a shared list so other modules do not collide
-
-    Installation:
-      1. Copy this file into your GreedMeter folder (same level as GreedMeter.toc)
-      2. Add this line to GreedMeter.toc (after the UI section is fine):
-           Threat.lua
-      3. /reload
+    Optional Threat, Tank, and Overall threat views.
+    Uses the server threat addon API when available; otherwise estimates from
+    meter data (party/raid only).
 ]]
 
 local OM = GreedMeter
@@ -85,24 +73,35 @@ end
 -- Constants / state
 -- ============================================================
 
+-- Server threat addon API
+-- Query:  SendAddonMessage("TWT_UDTSv4" or "TWT_UDTSv4_TM", "limit=N", RAID|PARTY)
+-- Reply:  arg2 contains "TWTv4=player:tank:threat:perc:melee;..." optional "#TMTv1=..."
 local THREAT_API_PREFIX    = "TWTv4="
 local TANK_MODE_API_PREFIX = "TMTv1="
 local THREAT_QUERY_BASE    = "TWT_UDTSv4"
-local THREAT_CHANNEL       = "RAID"
 local PULL_AGGRO_NAME      = "-Pull Aggro at-"
 
 Threat.usingApi            = false
 Threat.lastApiTime         = 0
-Threat.apiTimeout          = 4.0
+Threat.apiTimeout          = 6.0
 Threat.threats             = {}   -- [name] = { threat, perc, tank, tps, class, melee, estimated }
 Threat.tankModeThreats     = {}   -- [guid] = { creature, name, perc }  (API tank-mode multi-mob)
 Threat.overallThreat       = {}   -- [name] = { threat, class, estimated }  fight-total threat generated
+Threat.threatByTarget      = {}   -- [targetKey][player] = last API threat on that mob
+Threat.currentTargetKey    = nil  -- GUID/name key for the mob the last API packet was about
+-- Shared work across multiple threat windows (single / tank / overall):
+-- dataGen bumps whenever underlying tables change; list caches rebuild at most once per gen.
+Threat.dataGen             = 0
+Threat.listCache           = {}   -- [view] = { gen=n, list={...} }
+Threat.targetingCache      = {}   -- [playerName] = { enemyName, ... }
+Threat.targetingCacheGen   = -1
 Threat.targetName          = nil
 Threat.tankName            = nil
-Threat.queryInterval       = 0.55
+Threat.queryInterval       = 0.50
 Threat.lastQuery           = 0
 Threat.history             = {}   -- for TPS
 Threat.groupCombat         = false -- party/raid combat session (not just local regen)
+Threat.fleeingEnemies      = {}   -- [name or guid] = expireTime
 
 -- Improved class baseline modifiers (relative threat generation)
 -- Tanks higher, pure DPS lower, healers lowest base on damage contribution
@@ -217,6 +216,34 @@ local function HasHostileTarget()
     return true
 end
 
+-- Use RAID channel in a raid, otherwise PARTY
+local function GetThreatChannel()
+    if GetNumRaidMembers and GetNumRaidMembers() > 0 then
+        return "RAID"
+    end
+    return "PARTY"
+end
+
+-- API replies are only expected for elite/worldboss targets that are in combat.
+local function IsThreatApiTarget()
+    if not IsInGroup() then return false end
+    if not UnitExists("target") then return false end
+    if UnitIsPlayer("target") or UnitIsFriend("player", "target") then return false end
+
+    local classification = UnitClassification and UnitClassification("target") or nil
+    if classification ~= "worldboss"
+        and classification ~= "elite"
+        and classification ~= "rareelite" then
+        return false
+    end
+
+    -- No threat table until the mob is actually in combat
+    if UnitAffectingCombat and not UnitAffectingCombat("target") then
+        return false
+    end
+    return true
+end
+
 local function GetPlayerClass(name)
     if OM.players and OM.players[name] and OM.players[name].class then
         return OM.players[name].class
@@ -287,11 +314,25 @@ local function TankingModeEnabled()
     return v == "tank" or v == "all"
 end
 
+local function InvalidateThreatCaches()
+    Threat.dataGen = (Threat.dataGen or 0) + 1
+    -- listCache entries become stale via gen mismatch; drop tables to free memory
+    Threat.listCache = {}
+    -- targeting cache is tied to targetingCacheGen
+end
+
+-- Request TMTv1 multi-mob payload only when a tank window (or tank setting) needs it
+local function NeedTankModeApi()
+    if not OM:GetSetting("enableThreatMode") then return false end
+    if Threat.AnyFrameInTankView and Threat:AnyFrameInTankView() then
+        return true
+    end
+    local v = GetThreatView()
+    return v == "tank" or v == "all"
+end
+
 -- ============================================================
--- SuperWoW / GUID helpers
--- SuperWoW: UnitExists(unit) returns exists, guid
---           Unit* APIs accept a GUID string as the unit argument
---           TargetUnit(guid) selects that exact unit
+-- GUID helpers (optional enhanced client APIs when present)
 -- ============================================================
 
 local function HasSuperWoW()
@@ -304,7 +345,7 @@ end
 -- Returns a stable GUID string for a unit token, or nil
 local function GetUnitGUID(unit)
     if not unit then return nil end
-    -- SuperWoW: second return of UnitExists is the GUID
+    -- Enhanced clients: second return of UnitExists may be a GUID
     local exists, guid = UnitExists(unit)
     if exists and type(guid) == "string" and guid ~= "" and guid ~= unit then
         -- Prefer values that look like GUIDs (0x...) when present
@@ -312,13 +353,13 @@ local function GetUnitGUID(unit)
             return guid
         end
     end
-    -- Some SuperWoW / companion DLLs expose UnitGUID(unit)
+    -- Some clients also expose UnitGUID(unit)
     if UnitGUID then
         local g = UnitGUID(unit)
         if type(g) == "string" and g ~= "" then
             return g
         end
-        -- GudaIO-style: UnitGUID returns hi, lo numbers
+        -- Some clients return UnitGUID as hi, lo numbers
         if type(g) == "number" then
             local hi, lo = UnitGUID(unit)
             if hi and lo then
@@ -341,17 +382,19 @@ local function ShortGuidSuffix(guid)
     return s
 end
 
--- Target a specific enemy by GUID (SuperWoW) or fall back to name
+-- Target a specific enemy by GUID when available, else by name
 local function TargetEnemy(entry)
     if not entry then return end
     local guid = entry.data and entry.data.guid
     local name = entry.name
-    if guid and HasSuperWoW() then
-        -- SuperWoW accepts GUID as a unit token
-        if TargetUnit then
+    if guid and HasSuperWoW() and TargetUnit then
+        -- Stale GUIDs can crash some clients; only target when UnitExists.
+        local exists = UnitExists(guid)
+        if exists then
             TargetUnit(guid)
             return
         end
+        -- fall through to name targeting
     end
     if name and name ~= "" and TargetByName then
         TargetByName(name, 1)
@@ -368,7 +411,7 @@ local function RememberHostileTarget()
     local name = UnitName("target") or "Enemy"
     local guid = GetUnitGUID("target")
     if not guid or guid == "" then
-        -- Without SuperWoW we cannot distinguish same-name mobs reliably
+        -- Without GUID support we cannot distinguish same-name mobs reliably
         guid = "name:" .. name
     end
 
@@ -463,24 +506,23 @@ local function GetLocalThreatModifier()
 end
 
 -- ============================================================
--- Turtle API path
+-- Server threat API path
 -- ============================================================
 
 local function SendThreatQuery()
-    if not IsInGroup() then return end
-    if not UnitExists("target") or UnitIsPlayer("target") or UnitIsFriend("player", "target") then
-        return
-    end
+    -- Only query when the server is expected to answer
+    if not IsThreatApiTarget() then return end
 
     local query = THREAT_QUERY_BASE
-    if TankingModeEnabled() then
+    -- Tank-mode multi-mob payload only when a tank view actually needs it
+    if NeedTankModeApi() then
         query = query .. "_TM"
     end
-    local msg = "limit=20"
-    SendAddonMessage(query, msg, THREAT_CHANNEL)
-    if GetNumRaidMembers() == 0 and GetNumPartyMembers() > 0 then
-        SendAddonMessage(query, msg, "PARTY")
-    end
+
+    -- limit = how many players the server should include in the reply
+    local msg = "limit=19"
+    local channel = GetThreatChannel()
+    SendAddonMessage(query, msg, channel)
 end
 
 local function ParseThreatPacket(packet)
@@ -502,7 +544,23 @@ local function ParseThreatPacket(packet)
     ClearThreatTable()
     Threat.usingApi = true
     Threat.lastApiTime = GetTime()
-    Threat.targetName = UnitName("target")
+
+    -- Snapshots may be broadcast on PARTY/RAID when anyone queries.
+    -- Apply them to Overall even when this client has no hostile target.
+    if UnitExists("target")
+        and not UnitIsPlayer("target")
+        and not UnitIsFriend("player", "target") then
+        Threat.targetName = UnitName("target")
+        Threat.currentTargetKey = GetUnitGUID("target")
+            or ("name:" .. (Threat.targetName or "?"))
+    else
+        -- No local hostile target: retain last key so we keep filling the same
+        -- mob bucket, or use a shared fight key if we have never targeted.
+        if not Threat.currentTargetKey then
+            Threat.currentTargetKey = "raid:active"
+        end
+        -- targetName left as last known for UI title
+    end
 
     local pos = 1
     local len = string.len(data)
@@ -571,7 +629,7 @@ local function ParseThreatPacket(packet)
                     table.insert(parts, string.sub(chunk, p, colon - 1))
                     p = colon + 1
                 end
-                -- TWThreat TMTv1: creature:guid:secondPlayer:secondPerc
+                -- TMTv1 fields: creature:guid:secondPlayer:secondPerc
                 -- creature = mob name, name = runner-up player, perc = their threat %
                 -- Presence of a row means YOU are tanking that mob.
                 if table.getn(parts) >= 4 then
@@ -603,6 +661,7 @@ local function ParseThreatPacket(packet)
     -- Pull-aggro threshold is part of single-target Threat view
     Threat:AddPullAggroRow()
     Threat:UpdateOverallFromPlayerThreats()
+    InvalidateThreatCaches()
 
     return true
 end
@@ -796,6 +855,7 @@ local function BuildEstimatedThreat()
 
     Threat:AddPullAggroRow()
     Threat:UpdateOverallFromPlayerThreats()
+    InvalidateThreatCaches()
 end
 
 -- Overall rankings with no personal target — still only meter totals.
@@ -830,6 +890,7 @@ local function BuildEstimatedOverallOnly()
             }
         end
     end
+    InvalidateThreatCaches()
 end
 
 -- ============================================================
@@ -898,6 +959,235 @@ local function CurrentTargetThreatSnapshot()
     return myThreat, myPerc, status, iAmTanking
 end
 
+
+-- Resolve max HP / boss classification for a tank-mode enemy row.
+-- Prefer GUID unit tokens when available, otherwise the current target
+-- or party/raid members' targets.
+local function ResolveEnemyMaxHP(guid, name)
+    local function inspect(unit)
+        if not unit or not UnitExists(unit) then return 0, false end
+        if UnitIsPlayer(unit) or UnitIsFriend("player", unit) then return 0, false end
+        local maxHP = UnitHealthMax(unit) or 0
+        local isBoss = false
+        if UnitClassification then
+            local c = UnitClassification(unit)
+            if c == "worldboss" then
+                isBoss = true
+            end
+        end
+        -- Level -1 is a classic boss marker on many 1.12 clients
+        if UnitLevel then
+            local lvl = UnitLevel(unit)
+            if lvl and lvl < 0 then
+                isBoss = true
+            end
+        end
+        return maxHP, isBoss
+    end
+
+    if guid and type(guid) == "string"
+        and not string.find(guid, "^name:")
+        and not string.find(guid, "^row:")
+        and not string.find(guid, "^test") then
+        local hp, boss = inspect(guid)
+        if hp > 0 or boss then return hp, boss end
+    end
+
+    if UnitExists("target") and not UnitIsPlayer("target") and not UnitIsFriend("player", "target") then
+        local tGuid = GetUnitGUID("target")
+        local tName = UnitName("target")
+        if (guid and tGuid and tGuid == guid) or (name and tName and tName == name) then
+            return inspect("target")
+        end
+    end
+
+    -- Scan group targets for a matching GUID/name
+    local function scan(unit)
+        if not UnitExists(unit) then return nil end
+        local uGuid = GetUnitGUID(unit)
+        local uName = UnitName(unit)
+        if (guid and uGuid and uGuid == guid) or (name and uName and uName == name) then
+            local hp, boss = inspect(unit)
+            return hp, boss
+        end
+        return nil
+    end
+    local i
+    for i = 1, 4 do
+        local hp, boss = scan("party" .. i .. "target")
+        if hp then return hp, boss end
+    end
+    for i = 1, 40 do
+        local hp, boss = scan("raid" .. i .. "target")
+        if hp then return hp, boss end
+    end
+    return 0, false
+end
+
+-- Flag list entries whose max HP is much higher than the rest (boss among adds).
+local function MarkBossesByRelativeHP(list)
+    if not list or table.getn(list) < 2 then return end
+
+    local hps = {}
+    local i
+    for i = 1, table.getn(list) do
+        local hp = list[i].data and list[i].data.maxHP or 0
+        if hp > 0 then
+            table.insert(hps, hp)
+        end
+    end
+    if table.getn(hps) < 2 then return end
+
+    table.sort(hps, function(a, b) return a < b end)
+    -- Median of the lower half (exclude the top outlier when computing "typical" add HP)
+    local n = table.getn(hps)
+    local typical
+    if n >= 3 then
+        -- median of all but the largest value
+        local trimmed = n - 1
+        local mid = math.floor((trimmed + 1) / 2)
+        if math.mod(trimmed, 2) == 0 then
+            typical = (hps[mid] + hps[mid + 1]) / 2
+        else
+            typical = hps[mid]
+        end
+    else
+        typical = hps[1] -- smaller of the two
+    end
+    if not typical or typical <= 0 then return end
+
+    -- Boss threshold: at least 2.5x typical add HP (and preferably the clear top)
+    local threshold = typical * 2.5
+    for i = 1, table.getn(list) do
+        local d = list[i].data
+        if d and not d.isBoss then
+            local hp = d.maxHP or 0
+            if hp >= threshold then
+                d.isBoss = true
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- Flee detection (tank mode LOST → FLEEING)
+-- ============================================================
+
+local FLEE_FLAG_DURATION = 8.0
+
+local FLEE_DEBUFFS = {
+    ["Fear"] = true,
+    ["Psychic Scream"] = true,
+    ["Intimidating Shout"] = true,
+    ["Howl of Terror"] = true,
+    ["Scare Beast"] = true,
+    ["Seduction"] = true,
+    ["Blind"] = true,
+}
+
+local function MarkEnemyFleeing(name, guid)
+    local untilT = GetTime() + FLEE_FLAG_DURATION
+    if guid and guid ~= "" then
+        Threat.fleeingEnemies[guid] = untilT
+    end
+    if name and name ~= "" then
+        Threat.fleeingEnemies[name] = untilT
+    end
+end
+
+local function ClearEnemyFleeing(name, guid)
+    if guid then Threat.fleeingEnemies[guid] = nil end
+    if name then Threat.fleeingEnemies[name] = nil end
+end
+
+local function IsEnemyMarkedFleeing(name, guid)
+    local now = GetTime()
+    local t
+    if guid then
+        t = Threat.fleeingEnemies[guid]
+        if t and t > now then return true end
+        if t then Threat.fleeingEnemies[guid] = nil end
+    end
+    if name then
+        t = Threat.fleeingEnemies[name]
+        if t and t > now then return true end
+        if t then Threat.fleeingEnemies[name] = nil end
+    end
+    return false
+end
+
+-- Live inspect: fear-like debuffs on a unit token (target / SuperWoW GUID)
+local function UnitHasFleeDebuff(unit)
+    if not unit or not UnitExists(unit) then return false end
+    if not UnitDebuff then return false end
+    local i
+    for i = 1, 16 do
+        -- 1.12 UnitDebuff returns texture, stacks, debuffType (no name on many clients)
+        local texture, applications, debuffType = UnitDebuff(unit, i)
+        if not texture then break end
+        -- Prefer tooltip scan for the name when available
+    end
+    -- GameTooltip-based name scan (works on 1.12)
+    if not GameTooltip or not GameTooltip.SetUnitDebuff then
+        return false
+    end
+    for i = 1, 16 do
+        local texture = UnitDebuff(unit, i)
+        if not texture then break end
+        GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+        GameTooltip:SetUnitDebuff(unit, i)
+        local tipName = GameTooltipTextLeft1 and GameTooltipTextLeft1:GetText()
+        GameTooltip:Hide()
+        if tipName and FLEE_DEBUFFS[tipName] then
+            return true
+        end
+        -- Partial match for ranked names
+        if tipName then
+            local k
+            for k in pairs(FLEE_DEBUFFS) do
+                if string.find(tipName, k, 1, true) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function DetectFleeOnUnit(unit, name, guid)
+    if UnitHasFleeDebuff(unit) then
+        MarkEnemyFleeing(name, guid)
+        return true
+    end
+    return IsEnemyMarkedFleeing(name, guid)
+end
+
+-- Combat log / emote lines that indicate a mob is fleeing
+local function ParseFleeMessage(message)
+    if not message or message == "" then return end
+    local lower = string.lower(message)
+    if not (string.find(lower, "flee", 1, true)
+        or string.find(lower, "run away", 1, true)
+        or string.find(lower, "runs away", 1, true)) then
+        return
+    end
+    -- "%s attempts to run away in fear!" / "%s flees in fear!" / "X flees."
+    local name
+    local _
+    _, _, name = string.find(message, "^(.+) attempts to run away")
+    if not name then
+        _, _, name = string.find(message, "^(.+) flees")
+    end
+    if not name then
+        _, _, name = string.find(message, "^(.+) runs away")
+    end
+    if not name then return end
+    name = string.gsub(name, "%s+$", "")
+    if name == "" or name == "You" or name == "you" then return end
+    MarkEnemyFleeing(name, nil)
+end
+
+
 function Threat:BuildEnemyList(hiddenNames)
     local list = {}
 
@@ -926,7 +1216,7 @@ function Threat:BuildEnemyList(hiddenNames)
     local guid, info
     for guid, info in pairs(self.tankModeThreats) do
         local mobName = info.creature or info.name or "?"
-        -- TWThreat TMTv1 format: creature=mob, name=second-highest PLAYER, perc=their %
+        -- TMTv1: creature=mob, name=second-highest player, perc=their share
         -- Our estimation rows use name=mob. Prefer creature when it looks like a mob label.
         if info.creature and info.creature ~= "" then
             mobName = info.creature
@@ -967,6 +1257,8 @@ function Threat:BuildEnemyList(hiddenNames)
                 threat = perc
             end
 
+            local rowGuid = info.guid or guid
+            local maxHP, isBossUnit = ResolveEnemyMaxHP(rowGuid, mobName)
             table.insert(list, {
                 name  = mobName,
                 data  = {
@@ -974,19 +1266,69 @@ function Threat:BuildEnemyList(hiddenNames)
                     perc      = perc,
                     status    = status,
                     isEnemy   = true,
-                    guid      = info.guid or guid,
+                    guid      = rowGuid,
                     creature  = info.creature,
                     estimated = estimated,
                     isTest    = info.isTest,
                     secondPlayer = (info.name and info.creature and info.name ~= info.creature) and info.name or nil,
+                    maxHP     = maxHP,
+                    isBoss    = isBossUnit,
                 },
                 value = threat,
             })
         end
     end
 
-    -- Lowest threat first (enemies you are weakest on at the top)
+    -- Mark bosses by relative max HP: significantly tougher than peers in this list
+    MarkBossesByRelativeHP(list)
+
+    -- Annotate fleeing (combat-log/emote flag; live fear scan only on current target)
+    local li
+    for li = 1, table.getn(list) do
+        local e = list[li]
+        local d = e.data
+        if d then
+            local guid = d.guid
+            local fleeing = IsEnemyMarkedFleeing(e.name, guid)
+            if not fleeing and UnitExists("target") and UnitName("target") == e.name then
+                fleeing = DetectFleeOnUnit("target", e.name, guid)
+            end
+            -- If we have solid aggro again, clear a stale flee flag
+            if d.status == "green" or d.status == "yellow" then
+                ClearEnemyFleeing(e.name, guid)
+                fleeing = false
+            end
+            d.fleeing = fleeing and true or false
+        end
+    end
+
+    -- Sort priority (top → bottom):
+    --   1) Bosses still pinned first
+    --   2) LOST (no aggro, not fleeing)
+    --   3) FLEEING
+    --   4) Contested / secure aggro (yellow / green)
+    -- Within a group: lowest threat first (weakest hold nearer the top)
+    local function AggroRank(d)
+        if not d then return 1 end
+        if d.fleeing then return 2 end
+        local s = d.status
+        if s == "green" or s == "yellow" then
+            return 1  -- have / contested aggro — bottom group
+        end
+        return 3      -- LOST
+    end
+
     table.sort(list, function(a, b)
+        local aBoss = (a.data and a.data.isBoss) and 1 or 0
+        local bBoss = (b.data and b.data.isBoss) and 1 or 0
+        if aBoss ~= bBoss then
+            return aBoss > bBoss
+        end
+        local ar = AggroRank(a.data)
+        local br = AggroRank(b.data)
+        if ar ~= br then
+            return ar > br
+        end
         if a.value == b.value then
             local ga = (a.data and a.data.guid) or a.name
             local gb = (b.data and b.data.guid) or b.name
@@ -1028,29 +1370,94 @@ end
 -- ============================================================
 
 -- Accumulate fight-total threat generated per player (not target-specific)
+-- Rebuild overallThreat from per-target API snapshots when possible.
+-- The server API returns every party/raid member's threat on one mob
+-- (the current target). It does not return a full player×mob matrix. So we:
+--   1) Store each packet under that mob's key (GUID or name)
+--   2) Sum each player's threat across all mobs observed this fight
 function Threat:UpdateOverallFromPlayerThreats()
+    local targetKey = self.currentTargetKey
+    if not targetKey then
+        -- Fall back to name of current target if known
+        if UnitExists("target") and not UnitIsPlayer("target") then
+            targetKey = GetUnitGUID("target") or ("name:" .. (UnitName("target") or "?"))
+            self.currentTargetKey = targetKey
+        end
+    end
+
+    local anyApi = false
     local name, data
+
+    -- If we have a live target key, snapshot current threats table into that bucket
+    if targetKey then
+        if not self.threatByTarget[targetKey] then
+            self.threatByTarget[targetKey] = {}
+        end
+        local bucket = self.threatByTarget[targetKey]
+        for name, data in pairs(self.threats) do
+            if name and not data.isPull then
+                bucket[name] = data.threat or 0
+                if data.estimated == false then
+                    anyApi = true
+                end
+            end
+        end
+    end
+
+    -- Sum across all observed targets for each player
+    local totals = {}  -- [player] = { threat, class, tank, tps, estimated }
+    local tKey, bucket
+    for tKey, bucket in pairs(self.threatByTarget) do
+        for name, threat in pairs(bucket) do
+            local row = totals[name]
+            if not row then
+                row = { threat = 0, class = GetPlayerClass(name), tank = false, tps = 0, estimated = false }
+                totals[name] = row
+            end
+            row.threat = row.threat + (threat or 0)
+        end
+    end
+
+    -- Overlay class/tank/tps/estimated from the live single-target table
     for name, data in pairs(self.threats) do
         if name and not data.isPull then
-            local t = data.threat or 0
-            local prev = self.overallThreat[name]
-            local prevT = prev and prev.threat or 0
-            -- Track peak observed on any target + blend with cumulative estimate
-            local best = t
-            if prevT > best then best = prevT end
-            -- If threat rose this tick, add the delta as "generated"
-            local hist = self.history[name]
-            if hist and hist.threat and t > hist.threat then
-                best = prevT + (t - hist.threat)
+            local row = totals[name]
+            if not row then
+                -- No per-target buckets yet (estimate-only path): keep previous behavior
+                local prev = self.overallThreat[name]
+                local prevT = prev and prev.threat or 0
+                local t = data.threat or 0
+                local best = t
+                if prevT > best then best = prevT end
+                if data.estimated == false and t > prevT then
+                    best = t
+                end
+                self.overallThreat[name] = {
+                    threat    = best,
+                    class     = data.class or GetPlayerClass(name),
+                    estimated = data.estimated and true or false,
+                    tank      = data.tank,
+                    tps       = data.tps or 0,
+                }
+            else
+                row.class = data.class or row.class or GetPlayerClass(name)
+                row.tank = data.tank or row.tank
+                row.tps = data.tps or row.tps
+                if data.estimated == false then
+                    row.estimated = false
+                end
             end
-            self.overallThreat[name] = {
-                threat    = best,
-                class     = data.class or GetPlayerClass(name),
-                estimated = data.estimated,
-                tank      = data.tank,
-                tps       = data.tps or 0,
-            }
         end
+    end
+
+    for name, row in pairs(totals) do
+        self.overallThreat[name] = {
+            threat    = row.threat,
+            class     = row.class,
+            estimated = row.estimated,
+            tank      = row.tank,
+            tps       = row.tps,
+        }
     end
 end
 
@@ -1059,6 +1466,15 @@ end
 function Threat:GetEnemiesTargetingPlayer(playerName)
     local names = {}
     if not playerName or playerName == "" then return names end
+
+    -- One unit-token scan per player per data generation (shared across windows)
+    if self.targetingCacheGen == self.dataGen and self.targetingCache[playerName] then
+        return self.targetingCache[playerName]
+    end
+    if self.targetingCacheGen ~= self.dataGen then
+        self.targetingCache = {}
+        self.targetingCacheGen = self.dataGen or 0
+    end
 
     local seen = {}
 
@@ -1093,7 +1509,7 @@ function Threat:GetEnemiesTargetingPlayer(playerName)
         considerEnemyUnit("raidpet" .. i .. "target")
     end
 
-    -- SuperWoW: known GUID-keyed enemies can be addressed as unit tokens
+    -- Known GUID-keyed enemies can be addressed as unit tokens on some clients
     if HasSuperWoW() then
         local guid, info
         for guid, info in pairs(self.tankModeThreats) do
@@ -1105,6 +1521,7 @@ function Threat:GetEnemiesTargetingPlayer(playerName)
         end
     end
 
+    self.targetingCache[playerName] = names
     return names
 end
 
@@ -1204,20 +1621,56 @@ end
 function Threat:GetSortedList(hiddenNames, mode)
     mode = mode or "threat"
     local view = EffectiveView(mode)
+    local gen = self.dataGen or 0
 
+    -- Shared list cache: multiple windows on the same view reuse one build
+    local function filterHidden(src)
+        if not src then return {} end
+        if not hiddenNames then
+            -- Shallow copy so RefreshFrame can append a Total row safely
+            local copy = {}
+            local i
+            for i = 1, table.getn(src) do
+                copy[i] = src[i]
+            end
+            return copy
+        end
+        local out = {}
+        local i
+        for i = 1, table.getn(src) do
+            local e = src[i]
+            local hideKey = (e.data and e.data.guid) or e.name
+            if not hiddenNames[e.name] and not hiddenNames[hideKey] then
+                table.insert(out, e)
+            end
+        end
+        for i = 1, table.getn(out) do
+            out[i].rank = i
+        end
+        return out
+    end
+
+    local cached = self.listCache and self.listCache[view]
+    -- Tank list includes live flee/HP probes — reuse briefly, then rebuild
+    local maxAge = (view == "tank") and 0.5 or 30
+    if cached and cached.gen == gen and cached.list then
+        local age = GetTime() - (cached.time or 0)
+        if age <= maxAge then
+            return filterHidden(cached.list)
+        end
+    end
+
+    local list
     if view == "tank" then
-        return self:BuildEnemyList(hiddenNames)
-    end
-    if view == "overall" then
+        list = self:BuildEnemyList(nil)  -- unfiltered; hide applied below
+    elseif view == "overall" then
         self:UpdateOverallFromPlayerThreats()
-        return self:BuildOverallList(hiddenNames)
-    end
-
-    -- Single-target Threat mode → players + Pull Aggro row
-    local list = {}
-    local name, data
-    for name, data in pairs(self.threats) do
-        if not hiddenNames or not hiddenNames[name] then
+        list = self:BuildOverallList(nil)
+    else
+        -- Single-target Threat mode → players + Pull Aggro row
+        list = {}
+        local name, data
+        for name, data in pairs(self.threats) do
             local value = data.threat or 0
             if value > 0 or data.tank or data.isPull then
                 table.insert(list, {
@@ -1227,33 +1680,35 @@ function Threat:GetSortedList(hiddenNames, mode)
                 })
             end
         end
+
+        table.sort(list, function(a, b)
+            if a.data and a.data.isPull and b.data and b.data.tank then
+                return false
+            end
+            if b.data and b.data.isPull and a.data and a.data.tank then
+                return true
+            end
+            if a.data and a.data.isPull then
+                return a.value > (b.value or 0)
+            end
+            if b.data and b.data.isPull then
+                return (a.value or 0) > b.value
+            end
+            if a.value == b.value then
+                return a.name < b.name
+            end
+            return a.value > b.value
+        end)
+
+        local i
+        for i = 1, table.getn(list) do
+            list[i].rank = i
+        end
     end
 
-    table.sort(list, function(a, b)
-        -- Pull Aggro sits just under the current tank
-        if a.data and a.data.isPull and b.data and b.data.tank then
-            return false
-        end
-        if b.data and b.data.isPull and a.data and a.data.tank then
-            return true
-        end
-        if a.data and a.data.isPull then
-            return a.value > (b.value or 0)
-        end
-        if b.data and b.data.isPull then
-            return (a.value or 0) > b.value
-        end
-        if a.value == b.value then
-            return a.name < b.name
-        end
-        return a.value > b.value
-    end)
-
-    local i
-    for i = 1, table.getn(list) do
-        list[i].rank = i
-    end
-    return list
+    if not self.listCache then self.listCache = {} end
+    self.listCache[view] = { gen = gen, list = list, time = GetTime() }
+    return filterHidden(list)
 end
 
 function Threat:AnyFrameInThreatMode()
@@ -1283,6 +1738,7 @@ end
 -- ============================================================
 
 -- Format secondary text for a threat entry (used by our own RefreshFrame path)
+
 local function FormatThreatSecondary(data)
     if not data then return "0" end
 
@@ -1301,6 +1757,8 @@ local function FormatThreatSecondary(data)
             text = text .. " OK"
         elseif data.status == "yellow" then
             text = text .. " !!"
+        elseif data.fleeing then
+            text = text .. " FLEEING"
         else
             text = text .. " LOST"
         end
@@ -2153,6 +2611,16 @@ eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")
 eventFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
 eventFrame:RegisterEvent("RAID_ROSTER_UPDATE")
+-- Flee / fear combat-log lines
+eventFrame:RegisterEvent("CHAT_MSG_MONSTER_EMOTE")
+eventFrame:RegisterEvent("CHAT_MSG_MONSTER_SAY")
+eventFrame:RegisterEvent("CHAT_MSG_COMBAT_HOSTILE_DEATH")
+eventFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE")
+eventFrame:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE")
+eventFrame:RegisterEvent("CHAT_MSG_SPELL_AURA_GONE_OTHER")
+eventFrame:RegisterEvent("CHAT_MSG_SPELL_AURA_GONE_SELF")
+eventFrame:RegisterEvent("CHAT_MSG_COMBAT_MISC_INFO")
+eventFrame:RegisterEvent("CHAT_MSG_SYSTEM")
 
 eventFrame:SetScript("OnEvent", function()
     if not OM:GetSetting("enableThreatMode") then return end
@@ -2172,13 +2640,18 @@ eventFrame:SetScript("OnEvent", function()
         Threat.usingApi = false
         Threat.targetName = UnitName("target")
         RememberHostileTarget()
+        InvalidateThreatCaches()
         if Threat:AnyFrameInThreatMode() and UI.Refresh then
             UI:Refresh()
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
-        -- Leaving combat: drop the accumulated enemy list
+        -- Leaving combat: drop the accumulated enemy list and flee flags
         if not OM:GetSetting("testMode") then
             ClearTankModeTable()
+        end
+        local k
+        for k in pairs(Threat.fleeingEnemies) do
+            Threat.fleeingEnemies[k] = nil
         end
     elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
         if not IsInGroup() then
@@ -2190,6 +2663,17 @@ eventFrame:SetScript("OnEvent", function()
             if Threat:AnyFrameInThreatMode() and UI.Refresh then
                 UI:Refresh()
             end
+        end
+    elseif event == "CHAT_MSG_MONSTER_EMOTE"
+        or event == "CHAT_MSG_MONSTER_SAY"
+        or event == "CHAT_MSG_COMBAT_MISC_INFO"
+        or event == "CHAT_MSG_SYSTEM"
+        or event == "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE"
+        or event == "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE"
+        or event == "CHAT_MSG_SPELL_AURA_GONE_OTHER"
+        or event == "CHAT_MSG_SPELL_AURA_GONE_SELF" then
+        if arg1 and type(arg1) == "string" then
+            ParseFleeMessage(arg1)
         end
     end
 end)
@@ -2357,13 +2841,26 @@ function Threat:LoadTestData()
             tank      = (name == Threat.tankName),
         }
     end
+    InvalidateThreatCaches()
 end
 
 function Threat:ClearTestData()
-    if not self.testDataActive then return end
     self.testDataActive = false
     ClearThreatTable()
     ClearTankModeTable()
+    local k
+    for k in pairs(self.overallThreat) do
+        self.overallThreat[k] = nil
+    end
+    for k in pairs(self.threatByTarget) do
+        self.threatByTarget[k] = nil
+    end
+    self.currentTargetKey = nil
+    self.history = {}
+    self.usingApi = false
+    self.tankName = nil
+    self.targetName = nil
+    InvalidateThreatCaches()
 end
 
 local elapsed = 0
@@ -2387,24 +2884,31 @@ eventFrame:SetScript("OnUpdate", function()
     end
 
     local now = GetTime()
-    local groupCombat = IsGroupInCombat()
+    -- Target in combat counts as a fight session even if you are not flagged
+    local targetCombat = UnitExists("target") and UnitAffectingCombat and UnitAffectingCombat("target")
+    local groupCombat = IsGroupInCombat() or (targetCombat and true or false)
     local hostileTarget = HasHostileTarget()
+    local apiTarget = IsThreatApiTarget()
 
-    -- Group combat session: start/stop with the party, not only local regen.
-    -- Prevents late-combat healers from wiping overall data on their own REGON_DISABLED.
+    -- Group combat session: start/stop with the party/target, not only local regen.
     if groupCombat and not Threat.groupCombat then
         Threat.groupCombat = true
         local k
         for k in pairs(Threat.overallThreat) do
             Threat.overallThreat[k] = nil
         end
+        for k in pairs(Threat.threatByTarget) do
+            Threat.threatByTarget[k] = nil
+        end
+        Threat.currentTargetKey = nil
         Threat.usingApi = false
+        InvalidateThreatCaches()
     elseif not groupCombat and Threat.groupCombat then
         Threat.groupCombat = false
     end
 
-    -- Live API path still needs a hostile target (server API is target-scoped)
-    if IsInGroup() and hostileTarget then
+    -- Live server threat API
+    if apiTarget then
         if (now - Threat.lastQuery) >= Threat.queryInterval then
             Threat.lastQuery = now
             SendThreatQuery()
@@ -2417,15 +2921,13 @@ eventFrame:SetScript("OnUpdate", function()
 
     if not Threat.usingApi then
         if hostileTarget then
-            -- Single-target estimate (also feeds overall via UpdateOverallFromPlayerThreats)
+            -- Fallback estimate when API is silent (trash, no response, etc.)
             BuildEstimatedThreat()
         elseif IsInGroup() and (groupCombat or Threat.groupCombat) then
-            -- No target: still keep overall rankings alive for healers / untargeted players
             BuildEstimatedOverallOnly()
         end
-    elseif IsInGroup() and not hostileTarget and (groupCombat or Threat.groupCombat) then
-        -- API data was for a previous target; keep overall moving without a target
-        BuildEstimatedOverallOnly()
+    -- When API is live, keep the last snapshots even without a local target.
+    -- Do not overwrite with estimates until the API times out.
     end
 
     if UI.Refresh then
@@ -2532,19 +3034,11 @@ function Threat:OnCombatEnd()
 end
 
 function Threat:OnReset()
+    -- Always wipe threat tables first. Reload fake data only if test mode is still on.
+    Threat:ClearTestData()
     if OM:GetSetting("testMode") and OM:GetSetting("enableThreatMode") then
         Threat:LoadTestData()
-        return
     end
-    ClearThreatTable()
-    ClearTankModeTable()
-    local k
-    for k in pairs(Threat.overallThreat) do
-        Threat.overallThreat[k] = nil
-    end
-    Threat.history = {}
-    Threat.usingApi = false
-    Threat.testDataActive = false
 end
 
 OM:RegisterModule("Threat", Threat)
