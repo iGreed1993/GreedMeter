@@ -750,6 +750,11 @@ local THREAT_CAST_ABILITIES = {
     ["Faerie Fire"] = true,
     ["Faerie Fire (Feral)"] = true,
     ["Hamstring"] = true,
+    -- Pet / minion high-threat abilities (1.12)
+    ["Growl"] = true,          -- hunter pet
+    ["Intimidation"] = true,   -- hunter BM talent (threat on pet)
+    ["Torment"] = true,        -- voidwalker
+    ["Suffering"] = true,      -- voidwalker AoE threat
 }
 
 local function IsThreatCastAbility(spell)
@@ -2924,7 +2929,11 @@ local function ParseMessage(event, message)
         or string.find(message, "Demoralizing Shout", 1, true)
         or string.find(message, "Demoralizing Roar", 1, true)
         or string.find(message, "Faerie Fire", 1, true)
-        or string.find(message, "Hamstring", 1, true) then
+        or string.find(message, "Hamstring", 1, true)
+        or string.find(message, "Growl", 1, true)
+        or string.find(message, "Intimidation", 1, true)
+        or string.find(message, "Torment", 1, true)
+        or string.find(message, "Suffering", 1, true) then
         local src, spell
         local _
         _, _, spell = string.find(message, "^You perform (.+) on ")

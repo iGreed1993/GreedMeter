@@ -32,6 +32,10 @@ OM.defaults = {
     accountWideLayout = false, -- when true, window size/pos/count is shared across characters
     abbreviateNames = false,
     -- columnConfig, modeColors, modeEnabled are created on demand by Customization
+    customBarStyles = {}, -- user-imported bar textures { key, label, texture }
+    customBarFonts = {},  -- user-imported fonts { key, label, path }
+    showPetThreat = false, -- threat mode: show local pet as its own row
+    petAsTank = false,    -- tank mode: score aggro from pet instead of player
 }
 
 -- Per-character layout defaults

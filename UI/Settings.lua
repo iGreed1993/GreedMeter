@@ -1247,18 +1247,42 @@ local function MakeLabeledDropDown(parent, label, x, y, width, options, settingK
         end
     end
 
-    UIDropDownMenu_Initialize(dd, Init)
-    local cur = OM:GetSetting(settingKey)
-    local sel = 1
-    local i
-    for i = 1, table.getn(options) do
-        if options[i].key == cur then
-            sel = i
-            UIDropDownMenu_SetText(options[i].label, dd)
-            break
+    local function ApplySelection()
+        local cur = OM:GetSetting(settingKey)
+        local sel = 1
+        local i
+        for i = 1, table.getn(options) do
+            if options[i].key == cur then
+                sel = i
+                UIDropDownMenu_SetText(options[i].label, dd)
+                break
+            end
         end
+        if not options[sel] then
+            UIDropDownMenu_SetText(options[1] and options[1].label or "", dd)
+            sel = 1
+        elseif OM:GetSetting(settingKey) ~= options[sel].key then
+            -- keep text from loop; if no match, show first
+            local found = false
+            for i = 1, table.getn(options) do
+                if options[i].key == cur then found = true break end
+            end
+            if not found and options[1] then
+                UIDropDownMenu_SetText(options[1].label, dd)
+            end
+        end
+        UIDropDownMenu_SetSelectedID(dd, sel)
     end
-    UIDropDownMenu_SetSelectedID(dd, sel)
+
+    UIDropDownMenu_Initialize(dd, Init)
+    ApplySelection()
+
+    -- Allow callers to mutate `options` and refresh the menu text
+    dd.RefreshOptions = function()
+        UIDropDownMenu_Initialize(dd, Init)
+        ApplySelection()
+    end
+    dd._options = options
     return dd
 end
 
@@ -1382,17 +1406,12 @@ local function CreateCustomizationFrame()
     sec:SetTextColor(1, 0.85, 0.4)
     y = y - 16
 
-    local BAR_STYLES = UI.BAR_STYLES or {
+    local styleOpts = (UI.GetMergedBarStyles and UI.GetMergedBarStyles()) or (UI.BAR_STYLES or {
         { key = "Default", label = "Default" },
-        { key = "Smooth",  label = "Smooth" },
-        { key = "Flat",    label = "Flat" },
-    }
-    local BAR_FONTS = UI.BAR_FONTS or {
-        { key = "Friz",     label = "Friz Quadrata" },
-        { key = "Arial",    label = "Arial Narrow" },
-        { key = "Morpheus", label = "Morpheus" },
-        { key = "Skurri",   label = "Skurri" },
-    }
+    })
+    local fontOpts = (UI.GetMergedBarFonts and UI.GetMergedBarFonts()) or (UI.BAR_FONTS or {
+        { key = "Friz", label = "Friz Quadrata" },
+    })
     local NUM_FORMATS = {
         { key = "1k",    label = "1k" },
         { key = "10k",   label = "10k" },
@@ -1400,10 +1419,256 @@ local function CreateCustomizationFrame()
         { key = "never", label = "Never" },
     }
 
-    MakeLabeledDropDown(content, "Bar style:", 4, y, 110, BAR_STYLES, "barStyle")
-    MakeLabeledDropDown(content, "Bar font:", 160, y, 120, BAR_FONTS, "barFont")
+    local styleDD = MakeLabeledDropDown(content, "Bar style:", 4, y, 110, styleOpts, "barStyle")
+    local fontDD = MakeLabeledDropDown(content, "Bar font:", 160, y, 120, fontOpts, "barFont")
     MakeLabeledDropDown(content, "Number format:", 330, y, 90, NUM_FORMATS, "numberFormat")
     y = y - 48
+
+    -- ---- Custom media import ----
+    local importHdr = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    importHdr:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    importHdr:SetText("Import bar / font from another addon")
+    importHdr:SetTextColor(1, 0.85, 0.4)
+    y = y - 16
+
+    local exampleFs = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    exampleFs:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    exampleFs:SetText("Example: Interface\\AddOns\\SomeAddon\\media\\statusbar.tga")
+    exampleFs:SetTextColor(0.65, 0.65, 0.65)
+    y = y - 16
+
+    -- Type: Bar texture | Font
+    local importKind = "bar"  -- or "font"
+    local kindBar = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    kindBar:SetWidth(70)
+    kindBar:SetHeight(18)
+    kindBar:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    kindBar:SetText("Bar")
+    local kindFont = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    kindFont:SetWidth(70)
+    kindFont:SetHeight(18)
+    kindFont:SetPoint("LEFT", kindBar, "RIGHT", 4, 0)
+    kindFont:SetText("Font")
+
+    local function UpdateKindButtons()
+        if importKind == "bar" then
+            kindBar:Disable()
+            kindFont:Enable()
+            exampleFs:SetText("Example: Interface\\AddOns\\SomeAddon\\media\\statusbar.tga")
+        else
+            kindBar:Enable()
+            kindFont:Disable()
+            exampleFs:SetText("Example: Interface\\AddOns\\SomeAddon\\fonts\\MyFont.ttf")
+        end
+    end
+    kindBar:SetScript("OnClick", function()
+        importKind = "bar"
+        UpdateKindButtons()
+    end)
+    kindFont:SetScript("OnClick", function()
+        importKind = "font"
+        UpdateKindButtons()
+    end)
+    UpdateKindButtons()
+    y = y - 22
+
+    local pathLabel = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    pathLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    pathLabel:SetText("Path:")
+
+    local pathBox = CreateFrame("EditBox", "GreedMeterMediaPathBox", content)
+    pathBox:SetPoint("TOPLEFT", content, "TOPLEFT", 40, y + 4)
+    pathBox:SetWidth(420)
+    pathBox:SetHeight(18)
+    pathBox:SetAutoFocus(false)
+    pathBox:SetFontObject(GameFontHighlightSmall)
+    pathBox:SetText("")
+    pathBox:SetMaxLetters(200)
+    pathBox:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    pathBox:SetBackdropColor(0, 0, 0, 0.8)
+    pathBox:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    pathBox:SetTextInsets(4, 4, 0, 0)
+    pathBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+    pathBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
+
+    local importBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    importBtn:SetWidth(70)
+    importBtn:SetHeight(20)
+    importBtn:SetPoint("LEFT", pathBox, "RIGHT", 6, 0)
+    importBtn:SetText("Import")
+    y = y - 24
+
+    -- List of imported entries (simple text rows + remove)
+    local customListFS = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    customListFS:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    customListFS:SetJustifyH("LEFT")
+    customListFS:SetWidth(500)
+    y = y - 36
+
+    local removeBtns = {}
+
+    local function NormalizePath(p)
+        if not p then return "" end
+        p = string.gsub(p, "^%s+", "")
+        p = string.gsub(p, "%s+$", "")
+        p = string.gsub(p, "/", "\\")
+        return p
+    end
+
+    local function LabelFromPath(p)
+        local name = p
+        local s, e, cap = string.find(p, "([^\\]+)$")
+        if cap then name = cap end
+        name = string.gsub(name, "%.[Tt][Gg][Aa]$", "")
+        name = string.gsub(name, "%.[Bb][Ll][Pp]$", "")
+        name = string.gsub(name, "%.[Tt][Tt][Ff]$", "")
+        if name == "" then name = "Custom" end
+        return name
+    end
+
+    local function KeyFromPath(kind, p)
+        return "custom:" .. kind .. ":" .. string.lower(p)
+    end
+
+    local function RefreshCustomList()
+        local bars = OM:GetSetting("customBarStyles") or {}
+        local fonts = OM:GetSetting("customBarFonts") or {}
+        local lines = {}
+        local i
+        if table.getn(bars) > 0 then
+            table.insert(lines, "Bars:")
+            for i = 1, table.getn(bars) do
+                table.insert(lines, "  " .. (bars[i].label or bars[i].key) .. "  |  " .. (bars[i].texture or ""))
+            end
+        end
+        if table.getn(fonts) > 0 then
+            table.insert(lines, "Fonts:")
+            for i = 1, table.getn(fonts) do
+                table.insert(lines, "  " .. (fonts[i].label or fonts[i].key) .. "  |  " .. (fonts[i].path or ""))
+            end
+        end
+        if table.getn(lines) == 0 then
+            customListFS:SetText("|cff888888No custom bars/fonts imported yet.|r")
+        else
+            local text = lines[1] or ""
+            for i = 2, table.getn(lines) do
+                text = text .. "\n" .. lines[i]
+            end
+            customListFS:SetText(text)
+        end
+
+        -- Rebuild dropdown option tables in place so closures see updates
+        local function refill(dst, src)
+            local n = table.getn(dst)
+            local j
+            for j = n, 1, -1 do
+                table.remove(dst, j)
+            end
+            for j = 1, table.getn(src) do
+                table.insert(dst, src[j])
+            end
+        end
+        if UI.GetMergedBarStyles then
+            refill(styleOpts, UI.GetMergedBarStyles())
+        end
+        if UI.GetMergedBarFonts then
+            refill(fontOpts, UI.GetMergedBarFonts())
+        end
+        if styleDD and styleDD.RefreshOptions then styleDD.RefreshOptions() end
+        if fontDD and fontDD.RefreshOptions then fontDD.RefreshOptions() end
+    end
+
+    importBtn:SetScript("OnClick", function()
+        local path = NormalizePath(pathBox:GetText())
+        if path == "" then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Enter a file path first.")
+            return
+        end
+        if not string.find(path, "Interface\\") and not string.find(path, "Fonts\\") then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Path should start with Interface\\ or Fonts\\")
+            return
+        end
+
+        -- Prefer explicit button choice, but always trust file extension when clear
+        local kind = content.importKind or "bar"
+        local lower = string.lower(path)
+        if string.find(lower, "%.ttf") or string.find(lower, "%.otf") then
+            kind = "font"
+            content.importKind = "font"
+            UpdateKindButtons()
+        elseif string.find(lower, "%.tga") or string.find(lower, "%.blp") or string.find(lower, "%.png") then
+            kind = "bar"
+            content.importKind = "bar"
+            UpdateKindButtons()
+        end
+
+        local label = LabelFromPath(path)
+        if kind == "font" then
+            local list = OM:GetSetting("customBarFonts")
+            if type(list) ~= "table" then list = {} end
+            local key = KeyFromPath("font", path)
+            local i
+            for i = 1, table.getn(list) do
+                if list[i].key == key or list[i].path == path then
+                    DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r That font path is already imported.")
+                    return
+                end
+            end
+            table.insert(list, { key = key, label = label, path = path })
+            OM:SetSetting("customBarFonts", list)
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Imported font: " .. label)
+        else
+            local list = OM:GetSetting("customBarStyles")
+            if type(list) ~= "table" then list = {} end
+            local key = KeyFromPath("bar", path)
+            local i
+            for i = 1, table.getn(list) do
+                if list[i].key == key or list[i].texture == path then
+                    DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r That bar path is already imported.")
+                    return
+                end
+            end
+            table.insert(list, { key = key, label = label, texture = path })
+            OM:SetSetting("customBarStyles", list)
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Imported bar style: " .. label)
+        end
+        pathBox:SetText("")
+        pathBox:ClearFocus()
+        RefreshCustomList()
+        if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+        if UI.Refresh then UI:Refresh() end
+    end)
+
+local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    clearBtn:SetWidth(120)
+    clearBtn:SetHeight(18)
+    clearBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 520, y + 36)
+    clearBtn:SetText("Clear Imports")
+    clearBtn:SetScript("OnClick", function()
+        OM:SetSetting("customBarStyles", {})
+        OM:SetSetting("customBarFonts", {})
+        -- Fall back to built-ins if current selection was custom
+        local bs = OM:GetSetting("barStyle") or ""
+        local bf = OM:GetSetting("barFont") or ""
+        if string.find(bs, "custom:", 1, true) then
+            OM:SetSetting("barStyle", "Default")
+        end
+        if string.find(bf, "custom:", 1, true) then
+            OM:SetSetting("barFont", "Friz")
+        end
+        RefreshCustomList()
+        if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+        if UI.Refresh then UI:Refresh() end
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Custom bars/fonts cleared.")
+    end)
+
+    RefreshCustomList()
+    y = y - 8
 
     MakeSlider(content, "Bar height", 4, y, "barHeight", 10, 28, 1, 140)
     MakeSlider(content, "Font size", 200, y, "fontSize", 8, 18, 1, 140)
@@ -1513,6 +1778,26 @@ local function CreateCustomizationFrame()
             end
         end
 
+        -- Extra threat options (pets)
+        if entry.mode == "threat" then
+            -- Threat has column checkboxes on the first option row; pet option goes under them
+            yy = yy - rowH
+            local petOn = OM.GetSetting and OM:GetSetting("showPetThreat") == true
+            local petCb = MakeCheckbox(content, "Show pets (SuperWoW recommended)", baseX + 6, yy, petOn, function(checked)
+                if OM.SetSetting then OM:SetSetting("showPetThreat", checked) end
+                if UI.Refresh then UI:Refresh() end
+            end, cbSize, "Show your pet/minion as its own threat row (from Pet: damage in the meter).\nAlso enables solo threat estimates for questing.\nSuperWoW improves pet ownership detection.")
+            row.petThreatCb = petCb
+        elseif entry.mode == "tank" then
+            -- Tank has no column checkboxes; put pet option on the first option row (no empty gap)
+            local petTankOn = OM.GetSetting and OM:GetSetting("petAsTank") == true
+            local petTankCb = MakeCheckbox(content, "Use pet as Tank (SuperWoW recommended)", baseX + 6, yy, petTankOn, function(checked)
+                if OM.SetSetting then OM:SetSetting("petAsTank", checked) end
+                if UI.Refresh then UI:Refresh() end
+            end, cbSize, "Score tank-mode aggro from your pet/minion instead of you.\nTracks pettarget and whether the pet holds aggro.\nServer tank API is still player-based — this is estimate + unit scan.\nSuperWoW recommended for stable enemy IDs.")
+            row.petAsTankCb = petTankCb
+        end
+
         yy = yy - rowH - 6
         table.insert(f.modeRows, row)
         return yy
@@ -1534,7 +1819,7 @@ local function CreateCustomizationFrame()
 
     local needed = 32 + (-bottomY) + 52
     if needed < 480 then needed = 480 end
-    if needed > 700 then needed = 700 end
+    if needed > 780 then needed = 780 end
     f:SetHeight(needed)
 
     local close = (UI.CreateButton and UI.CreateButton(f, "Close", 70, 20, function()

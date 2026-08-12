@@ -113,12 +113,30 @@ local BAR_FONTS = {
     { key = "Skurri",   label = "Skurri",        path = "Fonts\\skurri.TTF" },
 }
 
+local function GetCustomBarStyles()
+    local t = OM.GetSetting and OM:GetSetting("customBarStyles")
+    if type(t) == "table" then return t end
+    return {}
+end
+
+local function GetCustomBarFonts()
+    local t = OM.GetSetting and OM:GetSetting("customBarFonts")
+    if type(t) == "table" then return t end
+    return {}
+end
+
 local function GetBarTexture()
     local key = OM.GetSetting and OM:GetSetting("barStyle") or "Default"
     local i
     for i = 1, table.getn(BAR_STYLES) do
         if BAR_STYLES[i].key == key then
             return BAR_STYLES[i].texture
+        end
+    end
+    local custom = GetCustomBarStyles()
+    for i = 1, table.getn(custom) do
+        if custom[i].key == key and custom[i].texture then
+            return custom[i].texture
         end
     end
     return BAR_STYLES[1].texture
@@ -132,7 +150,114 @@ local function GetBarFontPath()
             return BAR_FONTS[i].path
         end
     end
+    local custom = GetCustomBarFonts()
+    for i = 1, table.getn(custom) do
+        if custom[i].key == key and custom[i].path then
+            return custom[i].path
+        end
+    end
     return BAR_FONTS[1].path
+end
+
+local function PathLooksLikeFont(p)
+    if not p or type(p) ~= "string" then return false end
+    local lower = string.lower(p)
+    if string.find(lower, "%.ttf", 1, false) then return true end
+    if string.find(lower, "%.otf", 1, false) then return true end
+    return false
+end
+
+local function PathLooksLikeBarTexture(p)
+    if not p or type(p) ~= "string" then return false end
+    local lower = string.lower(p)
+    if PathLooksLikeFont(lower) then return false end
+    if string.find(lower, "%.tga", 1, false) then return true end
+    if string.find(lower, "%.blp", 1, false) then return true end
+    if string.find(lower, "%.png", 1, false) then return true end
+    return true -- unknown extension: treat as texture only if not a font
+end
+
+-- Move any font paths that were wrongly saved under customBarStyles into customBarFonts.
+local function MigrateMisfiledCustomMedia()
+    if not OM.GetSetting or not OM.SetSetting then return end
+    local bars = OM:GetSetting("customBarStyles")
+    local fonts = OM:GetSetting("customBarFonts")
+    if type(bars) ~= "table" then return end
+    if type(fonts) ~= "table" then fonts = {} end
+    local kept = {}
+    local changed = false
+    local i
+    for i = 1, table.getn(bars) do
+        local e = bars[i]
+        local p = e and (e.texture or e.path)
+        if e and PathLooksLikeFont(p) then
+            local key = e.key or ("custom:font:" .. string.lower(p))
+            local exists = false
+            local j
+            for j = 1, table.getn(fonts) do
+                if fonts[j].key == key or fonts[j].path == p then
+                    exists = true
+                    break
+                end
+            end
+            if not exists then
+                table.insert(fonts, {
+                    key = key,
+                    label = e.label or "Custom",
+                    path = p,
+                })
+            end
+            changed = true
+        elseif e and e.key then
+            -- Drop font-like entries; keep real textures
+            if e.texture and not PathLooksLikeFont(e.texture) then
+                table.insert(kept, e)
+            elseif e.texture and PathLooksLikeFont(e.texture) then
+                changed = true
+            else
+                table.insert(kept, e)
+            end
+        end
+    end
+    if changed then
+        OM:SetSetting("customBarStyles", kept)
+        OM:SetSetting("customBarFonts", fonts)
+    end
+end
+
+-- Merged lists for customization dropdowns (built-in + user imports)
+function UI.GetMergedBarStyles()
+    MigrateMisfiledCustomMedia()
+    local list = {}
+    local i
+    for i = 1, table.getn(BAR_STYLES) do
+        table.insert(list, BAR_STYLES[i])
+    end
+    local custom = GetCustomBarStyles()
+    for i = 1, table.getn(custom) do
+        local e = custom[i]
+        if e and e.key and e.texture and not PathLooksLikeFont(e.texture) then
+            table.insert(list, e)
+        end
+    end
+    return list
+end
+
+function UI.GetMergedBarFonts()
+    MigrateMisfiledCustomMedia()
+    local list = {}
+    local i
+    for i = 1, table.getn(BAR_FONTS) do
+        table.insert(list, BAR_FONTS[i])
+    end
+    local custom = GetCustomBarFonts()
+    for i = 1, table.getn(custom) do
+        local e = custom[i]
+        if e and e.key and e.path then
+            table.insert(list, e)
+        end
+    end
+    return list
 end
 
 local function FramesLocked()

@@ -58,6 +58,12 @@ OM.defaults = OM.defaults or {}
 if OM.defaults.enableThreatMode == nil then
     OM.defaults.enableThreatMode = false
 end
+if OM.defaults.showPetThreat == nil then
+    OM.defaults.showPetThreat = false
+end
+if OM.defaults.petAsTank == nil then
+    OM.defaults.petAsTank = false
+end
 -- threatView: "single" | "tank" | "overall" | "all"
 if OM.defaults.threatView == nil then
     OM.defaults.threatView = "single"
@@ -143,7 +149,39 @@ local SPELL_FLAT_THREAT = {
     ["Faerie Fire"] = 108,
     ["Faerie Fire (Feral)"] = 108,
     ["Hamstring"] = 104,
-    ["Rank 1"] = 0, -- placeholder ignored; matches use exact keys via SpellThreatFlat()
+
+    -- ============================================================
+    -- Pet / minion high-threat abilities (KLH Threat Meter 1.12 data)
+    -- Rankless keys use the highest rank typically available at 60.
+    -- ============================================================
+    -- Hunter pet Growl (ranks 1–7 in vanilla; values max→min)
+    ["Growl"] = 415,
+    ["Growl (Rank 1)"] = 50,
+    ["Growl (Rank 2)"] = 65,
+    ["Growl (Rank 3)"] = 110,
+    ["Growl (Rank 4)"] = 170,
+    ["Growl (Rank 5)"] = 240,
+    ["Growl (Rank 6)"] = 320,
+    ["Growl (Rank 7)"] = 415,
+
+    -- Hunter BM Intimidation (fixed)
+    ["Intimidation"] = 580,
+
+    -- Voidwalker Torment (ranks 1–6)
+    ["Torment"] = 395,
+    ["Torment (Rank 1)"] = 45,
+    ["Torment (Rank 2)"] = 75,
+    ["Torment (Rank 3)"] = 125,
+    ["Torment (Rank 4)"] = 215,
+    ["Torment (Rank 5)"] = 300,
+    ["Torment (Rank 6)"] = 395,
+
+    -- Voidwalker Suffering (ranks 1–4, AoE threat)
+    ["Suffering"] = 600,
+    ["Suffering (Rank 1)"] = 150,
+    ["Suffering (Rank 2)"] = 300,
+    ["Suffering (Rank 3)"] = 450,
+    ["Suffering (Rank 4)"] = 600,
 }
 
 local function SpellDamageThreatMult(spell)
@@ -214,6 +252,84 @@ local function HasHostileTarget()
     if not UnitExists("target") then return false end
     if UnitIsPlayer("target") or UnitIsFriend("player", "target") then return false end
     return true
+end
+
+local function ShowPetThreatEnabled()
+    return OM:GetSetting("showPetThreat") == true
+end
+
+local function PetAsTankEnabled()
+    return OM:GetSetting("petAsTank") == true
+end
+
+-- Local pet unit token / name (hunter pet or warlock minion)
+local function GetLocalPetName()
+    if UnitExists("pet") then
+        return UnitName("pet")
+    end
+    return nil
+end
+
+-- Unit we treat as the "tank actor" for tank-mode status checks
+local function GetTankActorUnit()
+    if PetAsTankEnabled() and UnitExists("pet") then
+        return "pet"
+    end
+    return "player"
+end
+
+local function GetTankActorName()
+    local u = GetTankActorUnit()
+    return UnitName(u)
+end
+
+-- Sum damage attributed to the owner's pet from meter spell totals.
+-- Parser stores pet hits as "Pet: <spell>" (or "Pet: Damage" when merged).
+local function PetDamageFromMeterData(data)
+    if not data or not data.damageSpells then return 0 end
+    local total = 0
+    local spell, amt
+    for spell, amt in pairs(data.damageSpells) do
+        if type(spell) == "string" and string.sub(spell, 1, 5) == "Pet: " then
+            total = total + (amt or 0)
+        end
+    end
+    return total
+end
+
+-- Pet/minion ability names that generate flat threat (matched as substring)
+local PET_FLAT_THREAT_NAMES = {
+    "Growl",
+    "Intimidation",
+    "Torment",
+    "Suffering",
+}
+
+local function IsPetFlatThreatSpell(spell)
+    if not spell or type(spell) ~= "string" then return false end
+    local i
+    for i = 1, table.getn(PET_FLAT_THREAT_NAMES) do
+        if string.find(spell, PET_FLAT_THREAT_NAMES[i], 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Flat threat from pet/minion threat abilities credited on the owner row
+local function PetAbilityThreatFromMeterData(data)
+    if not data or not data.threatCasts then return 0 end
+    local total = 0
+    local spell, count
+    for spell, count in pairs(data.threatCasts) do
+        if IsPetFlatThreatSpell(spell) then
+            count = count or 0
+            if count > 0 then
+                total = total + count * SpellFlatThreat(spell)
+            end
+        end
+    end
+    return total
 end
 
 -- Use RAID channel in a raid, otherwise PARTY
@@ -403,15 +519,13 @@ end
 
 -- Remember the current hostile target as its own GUID-keyed enemy row
 -- (lets Tank mode accumulate distinct same-name mobs as you tab through them)
-local function RememberHostileTarget()
-    if not TankingModeEnabled() then return end
-    if not UnitExists("target") then return end
-    if UnitIsPlayer("target") or UnitIsFriend("player", "target") then return end
+local function RememberHostileUnit(unit)
+    if not unit or not UnitExists(unit) then return end
+    if UnitIsPlayer(unit) or UnitIsFriend("player", unit) then return end
 
-    local name = UnitName("target") or "Enemy"
-    local guid = GetUnitGUID("target")
+    local name = UnitName(unit) or "Enemy"
+    local guid = GetUnitGUID(unit)
     if not guid or guid == "" then
-        -- Without GUID support we cannot distinguish same-name mobs reliably
         guid = "name:" .. name
     end
 
@@ -424,17 +538,30 @@ local function RememberHostileTarget()
             perc      = 0,
             threat    = 0,
             status    = "red",
-            estimated = not Threat.usingApi,
+            estimated = true,
         }
     else
-        existing.name = name
         existing.creature = existing.creature or name
+        existing.name = name
+        existing.guid = guid
     end
 end
 
--- ============================================================
--- Local player threat modifiers (stance + buffs)
--- ============================================================
+local function RememberHostileTarget()
+    if not TankingModeEnabled() and not (Threat.AnyFrameInTankView and Threat:AnyFrameInTankView()) then
+        -- Still allow remember when a tank window is open even if threatView setting is single
+    end
+    if UnitExists("target")
+        and not UnitIsPlayer("target") and not UnitIsFriend("player", "target") then
+        RememberHostileUnit("target")
+    end
+    -- Pet-as-tank: track what the pet is hitting
+    if PetAsTankEnabled() and UnitExists("pettarget")
+        and not UnitIsPlayer("pettarget") and not UnitIsFriend("player", "pettarget") then
+        RememberHostileUnit("pettarget")
+    end
+end
+
 
 local function GetLocalThreatModifier()
     local mod = 1.0
@@ -784,7 +911,8 @@ local function BuildEstimatedThreat()
     Threat.usingApi = false
     Threat.targetName = UnitName("target")
 
-    if not IsInGroup() then
+    -- Solo allowed when "Show pets" is on so hunters/locks can quest with threat bars
+    if not IsInGroup() and not ShowPetThreatEnabled() then
         return
     end
     if not HasHostileTarget() then
@@ -801,15 +929,33 @@ local function BuildEstimatedThreat()
         localMod = GetLocalThreatModifier()
     end
 
-    -- Small bias when we are the mob's current target (likely tanking)
-    local iAmTanking = UnitExists("targettarget") and UnitIsUnit("player", "targettarget")
+    local tankUnit = GetTankActorUnit()
+    local tankName = GetTankActorName() or me
+    local iAmTanking = UnitExists("targettarget") and UnitIsUnit(tankUnit, "targettarget")
+    if PetAsTankEnabled() and not iAmTanking and UnitExists("pettargettarget") then
+        iAmTanking = UnitIsUnit("pet", "pettargettarget")
+    end
 
     local maxThreat = 0
     local list = {}
     local name, data
     for name, data in pairs(segment.players) do
         local threat, class = ThreatFromMeterPlayer(name, data, me, localMod)
-        if name == me and iAmTanking then
+        local petThreat = 0
+        if ShowPetThreatEnabled() and me and name == me then
+            local petDmg = PetDamageFromMeterData(data)
+            local growlThreat = PetAbilityThreatFromMeterData(data)
+            local petPortion = petDmg + growlThreat
+            if petPortion > 0 then
+                -- Remove pet portion from the owner row (class/stance mod was applied to the sum)
+                local stripped = threat - (petPortion * localMod)
+                if stripped < 0 then stripped = 0 end
+                threat = stripped
+                -- Pet threat is not scaled by the hunter's stance/class mod
+                petThreat = petPortion
+            end
+        end
+        if name == tankName and iAmTanking then
             threat = threat * 1.15
         end
         if threat > 0 then
@@ -817,9 +963,46 @@ local function BuildEstimatedThreat()
                 name = name,
                 threat = threat,
                 class = class,
-                isLikelyTank = (name == me and iAmTanking) or false,
+                isLikelyTank = (name == tankName and iAmTanking) or false,
+                isPet = false,
             })
             if threat > maxThreat then maxThreat = threat end
+        end
+        if petThreat > 0 then
+            local petName = GetLocalPetName() or "Pet"
+            local petIsTank = PetAsTankEnabled() and iAmTanking
+            if petIsTank then
+                petThreat = petThreat * 1.15
+            end
+            table.insert(list, {
+                name = petName,
+                threat = petThreat,
+                class = class,
+                isLikelyTank = petIsTank,
+                isPet = true,
+            })
+            if petThreat > maxThreat then maxThreat = petThreat end
+        end
+    end
+
+    -- Solo with show pets but no segment player row yet: still show pet if we have a name
+    if ShowPetThreatEnabled() and not IsInGroup() and table.getn(list) == 0 and me then
+        local pdata = segment.players[me]
+        if pdata then
+            local petDmg = PetDamageFromMeterData(pdata)
+            local growlThreat = PetAbilityThreatFromMeterData(pdata)
+            local petPortion = petDmg + growlThreat
+            if petPortion > 0 then
+                local petName = GetLocalPetName() or "Pet"
+                table.insert(list, {
+                    name = petName,
+                    threat = petPortion,
+                    class = pdata.class,
+                    isLikelyTank = iAmTanking and PetAsTankEnabled(),
+                    isPet = true,
+                })
+                maxThreat = petPortion
+            end
         end
     end
 
@@ -847,6 +1030,7 @@ local function BuildEstimatedThreat()
             melee     = false,
             class     = e.class,
             estimated = true,
+            isPet     = e.isPet and true or false,
         }
         if isTank then
             Threat.tankName = e.name
@@ -926,17 +1110,35 @@ local function EnemyStatusFromLead(myThreat, secondThreat)
     return "green"
 end
 
--- Live snapshot of the player's threat situation on the current target
+-- Live snapshot of the tank actor's threat on the current target
+-- (player by default; pet when "Use pet as Tank" is on)
 local function CurrentTargetThreatSnapshot()
-    local me = UnitName("player")
-    local myData = me and Threat.threats[me]
+    local actor = GetTankActorName() or UnitName("player")
+    local actorUnit = GetTankActorUnit()
+    local myData = actor and Threat.threats[actor]
     local myThreat = myData and (myData.threat or 0) or 0
     local myPerc = myData and (myData.perc or 0) or 0
-    local iAmTanking = UnitExists("targettarget") and UnitIsUnit("player", "targettarget")
+    -- Pet-as-tank: also try player row if pet has no estimate yet
+    if PetAsTankEnabled() and myThreat <= 0 then
+        local petName = GetLocalPetName()
+        if petName and Threat.threats[petName] then
+            myData = Threat.threats[petName]
+            myThreat = myData.threat or 0
+            myPerc = myData.perc or 0
+            actor = petName
+        end
+    end
+    local iAmTanking = UnitExists("targettarget") and UnitIsUnit(actorUnit, "targettarget")
+    -- If looking at pettarget, check that unit's targettarget
+    if not iAmTanking and PetAsTankEnabled() and UnitExists("pettarget") then
+        if UnitExists("pettargettarget") and UnitIsUnit("pet", "pettargettarget") then
+            iAmTanking = true
+        end
+    end
     local second = 0
     local n, d
     for n, d in pairs(Threat.threats) do
-        if n ~= me and not d.isPull and (d.threat or 0) > second then
+        if n ~= actor and not d.isPull and (d.threat or 0) > second then
             second = d.threat or 0
         end
     end
@@ -944,7 +1146,6 @@ local function CurrentTargetThreatSnapshot()
     local status
     if iAmTanking then
         status = EnemyStatusFromLead(myThreat, second)
-        -- Ensure non-zero so bars render while tanking even if API/estimate is lagging
         if myThreat <= 0 then
             myThreat = 1
             myPerc = 100
@@ -952,7 +1153,6 @@ local function CurrentTargetThreatSnapshot()
     else
         status = "red"
         if myThreat <= 0 and myPerc <= 0 then
-            -- still show the row; 0 threat is valid when you have no aggro
             myThreat = 0
         end
     end
@@ -1191,13 +1391,17 @@ end
 function Threat:BuildEnemyList(hiddenNames)
     local list = {}
 
-    -- Always remember / refresh the current hostile target so the list is not stuck at 0
-    if UnitExists("target")
-        and not UnitIsPlayer("target") and not UnitIsFriend("player", "target") then
-        RememberHostileTarget()
-        local tName = UnitName("target") or "Target"
-        local tGuid = GetUnitGUID("target") or ("name:" .. tName)
+    -- Track player target and (when enabled) pet target
+    RememberHostileTarget()
+
+    local function RefreshActiveUnit(unit)
+        if not unit or not UnitExists(unit) then return end
+        if UnitIsPlayer(unit) or UnitIsFriend("player", unit) then return end
+        local tName = UnitName(unit) or "Target"
+        local tGuid = GetUnitGUID(unit) or ("name:" .. tName)
         local myThreat, myPerc, status = CurrentTargetThreatSnapshot()
+        -- When using pet as tank and this is the player's target (not pettarget),
+        -- still report the pet actor's status on that mob.
         local row = self.tankModeThreats[tGuid]
         if row then
             row.name = tName
@@ -1205,11 +1409,15 @@ function Threat:BuildEnemyList(hiddenNames)
             row.threat = myThreat
             row.perc = myPerc
             row.status = status
-            -- Prefer live numbers over a stale API row for the active target
             if myThreat > 0 or status ~= "red" then
                 row.estimated = not self.usingApi
             end
         end
+    end
+
+    RefreshActiveUnit("target")
+    if PetAsTankEnabled() then
+        RefreshActiveUnit("pettarget")
     end
 
     -- Multi-mob table is GUID-keyed so same-name mobs stay distinct
@@ -2945,6 +3153,8 @@ function Threat:OnLoad()
     end
     if OM.db then
         if OM.db.enableThreatMode == nil then OM.db.enableThreatMode = false end
+        if OM.db.showPetThreat == nil then OM.db.showPetThreat = false end
+        if OM.db.petAsTank == nil then OM.db.petAsTank = false end
         if OM.db.threatView == nil then
             -- migrate legacy tank checkbox
             if OM.db.enableTankingMode then
