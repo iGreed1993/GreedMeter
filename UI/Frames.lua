@@ -47,35 +47,46 @@ local ShowBarTooltip = UI.ShowBarTooltip
 -- positions stay on-screen across resolution/scale changes too.
 -- ============================================================
 
+-- Clamp using real on-screen edges (GetLeft/Right/Top/Bottom).
+-- Avoid GetWidth/GetHeight vs UIParent:GetWidth — those mix local size with
+-- screen coords and over-push on top/right under many UI scales.
 local function ClampFrameToScreen(f)
     if not f or not f.GetLeft then return end
     local left = f:GetLeft()
+    local right = f:GetRight()
+    local top = f:GetTop()
     local bottom = f:GetBottom()
-    local width = f:GetWidth()
-    local height = f:GetHeight()
-    if not left or not bottom or not width or not height then return end
+    if not left or not right or not top or not bottom then return end
 
     local parent = UIParent
-    local pw = parent:GetWidth()
-    local ph = parent:GetHeight()
-    if not pw or not ph or pw <= 0 or ph <= 0 then return end
+    local screenLeft = parent:GetLeft() or 0
+    local screenBottom = parent:GetBottom() or 0
+    local screenRight = parent:GetRight()
+    local screenTop = parent:GetTop()
+    if not screenRight or not screenTop then return end
 
-    -- Keep a grab-able strip on-screen even if the user dragged mostly off
-    local minVisible = 24
-    if width < minVisible then minVisible = width end
-    if height < minVisible then minVisible = height end
+    -- Tiny pad so the border is not flush against the very edge (0 = flush OK)
+    local pad = 0
+    local dx, dy = 0, 0
 
-    local newLeft, newBottom = left, bottom
-    if newLeft + width < minVisible then newLeft = minVisible - width end
-    if newLeft > pw - minVisible then newLeft = pw - minVisible end
-    if newBottom + height < minVisible then newBottom = minVisible - height end
-    if newBottom > ph - minVisible then newBottom = ph - minVisible end
+    if left < screenLeft + pad then
+        dx = (screenLeft + pad) - left
+    elseif right > screenRight - pad then
+        dx = (screenRight - pad) - right
+    end
 
-    if newLeft ~= left or newBottom ~= bottom then
+    if bottom < screenBottom + pad then
+        dy = (screenBottom + pad) - bottom
+    elseif top > screenTop - pad then
+        dy = (screenTop - pad) - top
+    end
+
+    if dx ~= 0 or dy ~= 0 then
         f:ClearAllPoints()
-        f:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", newLeft, newBottom)
+        f:SetPoint("BOTTOMLEFT", parent, "BOTTOMLEFT", left + dx, bottom + dy)
     end
 end
+UI.ClampFrameToScreen = ClampFrameToScreen
 
 local function SafeStartMoving(f)
     if not f then return end

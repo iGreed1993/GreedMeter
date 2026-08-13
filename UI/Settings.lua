@@ -183,29 +183,19 @@ function UI:CreateSettingsFrame()
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function()
+        -- Never clamp during drag (native SetClampedToScreen + StartMoving can crash)
         if this.SetClampedToScreen then this:SetClampedToScreen(false) end
         this:StartMoving()
     end)
     f:SetScript("OnDragStop", function()
         this:StopMovingOrSizing()
-        local left, bottom = this:GetLeft(), this:GetBottom()
-        local width, height = this:GetWidth(), this:GetHeight()
-        if left and bottom and width and height then
-            local pw, ph = UIParent:GetWidth(), UIParent:GetHeight()
-            local nl, nb = left, bottom
-            if nl < 4 then nl = 4 end
-            if nb < 4 then nb = 4 end
-            if nl + width > pw - 4 then nl = pw - 4 - width end
-            if nb + height > ph - 4 then nb = ph - 4 - height end
-            if nl ~= left or nb ~= bottom then
-                this:ClearAllPoints()
-                this:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", nl, nb)
-            end
+        if UI.ClampFrameToScreen then
+            UI.ClampFrameToScreen(this)
         end
-        if this.SetClampedToScreen then this:SetClampedToScreen(true) end
+        -- Do not re-enable SetClampedToScreen — manual edge clamp only
     end)
     f:SetFrameStrata("DIALOG")
-    f:SetClampedToScreen(true)
+    -- Manual edge clamp only (no engine SetClampedToScreen)
 
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOP", f, "TOP", 0, -10)
@@ -1300,7 +1290,7 @@ local function CreateCustomizationFrame()
     -- Strata/level BEFORE children so widgets stay above the backdrop
     f:SetFrameStrata("DIALOG")
     f:SetFrameLevel(50)
-    f:SetClampedToScreen(true)
+    -- Manual edge clamp only (no engine SetClampedToScreen)
     f:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -1313,26 +1303,16 @@ local function CreateCustomizationFrame()
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function()
+        -- Never clamp during drag (native SetClampedToScreen + StartMoving can crash)
         if this.SetClampedToScreen then this:SetClampedToScreen(false) end
         this:StartMoving()
     end)
     f:SetScript("OnDragStop", function()
         this:StopMovingOrSizing()
-        local left, bottom = this:GetLeft(), this:GetBottom()
-        local width, height = this:GetWidth(), this:GetHeight()
-        if left and bottom and width and height then
-            local pw, ph = UIParent:GetWidth(), UIParent:GetHeight()
-            local nl, nb = left, bottom
-            if nl < 4 then nl = 4 end
-            if nb < 4 then nb = 4 end
-            if nl + width > pw - 4 then nl = pw - 4 - width end
-            if nb + height > ph - 4 then nb = ph - 4 - height end
-            if nl ~= left or nb ~= bottom then
-                this:ClearAllPoints()
-                this:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", nl, nb)
-            end
+        if UI.ClampFrameToScreen then
+            UI.ClampFrameToScreen(this)
         end
-        if this.SetClampedToScreen then this:SetClampedToScreen(true) end
+        -- Do not re-enable SetClampedToScreen — manual edge clamp only
     end)
 
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
