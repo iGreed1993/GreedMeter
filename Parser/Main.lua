@@ -1772,7 +1772,7 @@ end
 -- Exception: PERIODIC_DISPEL_SPELLS (Abolish Disease/Poison, cleansing totems)
 -- never enter the cast↔fade pairing path. Their removals are only credited when
 -- the combat log explicitly names the ability as the remover.
-local PENDING_DISPEL_WINDOW = 0.45
+local PENDING_DISPEL_WINDOW = 1.25  -- others' cast↔fade lines can be farther apart than self "You remove"
 local HARMFUL_AURA_TTL = 180  -- remember afflictions this long for fade matching
 local recentDispelFades = {}  -- { { spell, target, time }, ... }
 local pendingDispelCasts = {} -- { { caster, target, time, spell }, ... }
@@ -1996,17 +1996,26 @@ local function NoteDispelCast(caster, target, spellName)
 
     PruneDispelBuffers(now)
 
-    -- Match the closest buffered fade that is a tracked harmful aura
-    -- (may have arrived before the cast line)
+    -- Match the closest buffered fade (may have arrived before the cast line).
+    -- Prefer known-harmful fades; also accept same-target pairs so group
+    -- dispels work when we never saw the original affliction line.
     local bestIdx, bestScore = nil, nil
     local i, fade
     for i, fade in ipairs(recentDispelFades) do
-        if fade.spell and not IsFriendlyAura(fade.spell)
-            and IsTrackedHarmfulAura(fade.target or target, fade.spell) then
+        if fade.spell and not IsFriendlyAura(fade.spell) then
+            local ft = fade.target or target
+            local known = fade.knownHarmful or IsTrackedHarmfulAura(ft, fade.spell)
             local score = DispelPairScore(now, target, fade.time, fade.target)
-            if score and (not bestScore or score < bestScore) then
-                bestScore = score
-                bestIdx = i
+            if score then
+                local ct = target and NormalizeName(target) or nil
+                local ftn = ft and NormalizeName(ft) or nil
+                local targetMatched = ct and ftn and ct == ftn
+                if known or targetMatched then
+                    if not bestScore or score < bestScore then
+                        bestScore = score
+                        bestIdx = i
+                    end
+                end
             end
         end
     end
@@ -2042,20 +2051,27 @@ local function TryCreditPendingDispel(fadedSpell, target)
     local now = GetTime()
     PruneDispelBuffers(now)
 
-    -- Only consider fades of auras we actually saw applied as harmful.
-    -- This is the main guard against pairing a dispel cast with a random
-    -- natural expiration (DoT tick-end, buff drop, etc.).
-    if not IsTrackedHarmfulAura(target, fadedSpell) then
-        return false
-    end
+    local knownHarmful = IsTrackedHarmfulAura(target, fadedSpell)
 
+    -- Match a pending cast first. Group members often only generate
+    -- "Name casts Dispel on X" + "Spell fades from X" (no "Name removes …").
+    -- Self usually gets the direct remove line; others rely on this path.
     local bestIdx, bestScore = nil, nil
     local i, cast
     for i, cast in ipairs(pendingDispelCasts) do
         local score = DispelPairScore(cast.time, cast.target, now, target)
-        if score and (not bestScore or score < bestScore) then
-            bestScore = score
-            bestIdx = i
+        if score then
+            -- If the cast named a target and it matches this fade, trust it
+            -- even when we never saw the original "afflicted by" line.
+            local ct = cast.target and NormalizeName(cast.target) or nil
+            local ft = target and NormalizeName(target) or nil
+            local targetMatched = ct and ft and ct == ft
+            if targetMatched or knownHarmful then
+                if not bestScore or score < bestScore then
+                    bestScore = score
+                    bestIdx = i
+                end
+            end
         end
     end
     if bestIdx then
@@ -2066,11 +2082,13 @@ local function TryCreditPendingDispel(fadedSpell, target)
         return true
     end
 
-    -- Buffer only harmful tracked fades so a slightly later cast can claim them
+    -- Buffer fades for a slightly later cast. Prefer known harmful, but also
+    -- keep non-friendly fades briefly so other players' casts can still pair.
     table.insert(recentDispelFades, {
         spell = fadedSpell,
         target = target,
         time = now,
+        knownHarmful = knownHarmful and true or false,
     })
     return false
 end
@@ -2153,6 +2171,21 @@ local function ParseDispelMessage(message)
         NoteDispelCast(playerName, nil, castSpellOnly)
         return true
     end
+    -- "You perform SPELL on TARGET." (some clients use perform for cleanses)
+    local _, _, perfSpell, perfTarget = string.find(message, "^You perform (.+) on (.+)%.?$")
+    if perfSpell and IsDispelSpell(perfSpell) then
+        NoteDispelCast(playerName, perfTarget, perfSpell)
+        return true
+    end
+    -- "SOURCE performs SPELL on TARGET."
+    local _, _, perfSrc, perfSpell2, perfTarget2 = string.find(message, "^(.+) performs (.+) on (.+)%.?$")
+    if perfSrc and perfSpell2 and IsDispelSpell(perfSpell2) then
+        if perfSrc ~= "You" and not string.find(perfSrc, "^Your ") then
+            NoteDispelCast(perfSrc, perfTarget2, perfSpell2)
+            return true
+        end
+    end
+
     -- "SOURCE casts SPELL on TARGET." / "SOURCE casts SPELL."
     local _, _, castSrc, castSpell2, castTarget2 = string.find(message, "^(.+) casts (.+) on (.+)%.?$")
     if castSrc and castSpell2 and IsDispelSpell(castSpell2) then
@@ -2229,6 +2262,7 @@ local function ParseInterruptOrDispel(event, message)
     end
     -- Dispel casts + direct remove lines
     if string.find(lower, "cast", 1, true)
+    or string.find(lower, "perform", 1, true)
     or string.find(lower, "remove", 1, true)
     or string.find(lower, "purify", 1, true)
     or string.find(lower, "cleanse", 1, true)
@@ -2236,6 +2270,7 @@ local function ParseInterruptOrDispel(event, message)
     or string.find(lower, "dispel", 1, true)
     or string.find(lower, "purge", 1, true)
     or string.find(lower, "devour", 1, true)
+    or string.find(lower, "abolish", 1, true)
     or string.find(lower, "totem", 1, true) then
         if ParseDispelMessage(message) then return true end
     end
@@ -2883,12 +2918,17 @@ local function ParseMessage(event, message)
     if string.find(message, "interrupt", 1, true)
     or string.find(message, "Interrupt", 1, true)
     or string.find(message, "cast", 1, true)
+    or string.find(message, "perform", 1, true)
     or string.find(message, "remove", 1, true)
     or string.find(message, "fades from", 1, true)
     or string.find(message, "Purify", 1, true)
     or string.find(message, "Cleanse", 1, true)
     or string.find(message, "Dispel", 1, true)
-    or string.find(message, "Purge", 1, true) then
+    or string.find(message, "Purge", 1, true)
+    or string.find(message, "Cure", 1, true)
+    or string.find(message, "Abolish", 1, true)
+    or string.find(message, "Devour", 1, true)
+    or string.find(message, "Remove Curse", 1, true) then
         if ParseInterruptOrDispel(event, message) then
             return
         end
