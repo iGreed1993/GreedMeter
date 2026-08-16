@@ -254,6 +254,9 @@ function UI:CreateSettingsFrame()
     y = y - 26
     AddCheckbox(f, "Confirm before reset", 16, y, "confirmReset", "Show a confirmation popup when pressing Reset")
     y = y - 24
+    AddCheckbox(f, "Party Reset", 16, y, "partyReset",
+        "Attempts to reset after joining/leaving a party or raid. Follows confirm settings")
+    y = y - 24
     AddCheckbox(f, "Confirm before announce", 16, y, "confirmAnnounce", "Show a confirmation popup when pressing Announce")
     y = y - 24
     AddCheckbox(f, "Show total bar", 16, y, "showTotal", "Add a Total row summing all players")
@@ -1652,7 +1655,7 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
 
     MakeSlider(content, "Bar height", 4, y, "barHeight", 10, 28, 1, 140)
     MakeSlider(content, "Font size", 200, y, "fontSize", 8, 18, 1, 140)
-    MakeSlider(content, "Frame opacity", 400, y, "frameOpacity", 30, 100, 5, 140)
+    MakeSlider(content, "Background opacity", 400, y, "frameOpacity", 0, 100, 5, 140)
     y = y - 40
 
     MakeDivider(content, y, contentW)

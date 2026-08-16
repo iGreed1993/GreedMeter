@@ -28,6 +28,7 @@ OM.defaults = {
     combatLogRangeSetting = 200,
     frameOpacity = 100,
     confirmReset = false,
+    partyReset = false, -- auto-reset on join/leave party or party→raid
     confirmAnnounce = false,
     accountWideLayout = false, -- when true, window size/pos/count is shared across characters
     abbreviateNames = false,

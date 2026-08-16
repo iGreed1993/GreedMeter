@@ -88,6 +88,31 @@ local function ClampFrameToScreen(f)
 end
 UI.ClampFrameToScreen = ClampFrameToScreen
 
+-- Background-only opacity: header, bars, and text stay fully visible.
+-- frameOpacity 0–100 maps to backdrop alpha 0–0.80 (matches default look at 100).
+local BACKDROP_ALPHA_MAX = 0.80
+local function ApplyFrameBackgroundOpacity(f)
+    if not f or not f.SetBackdropColor then return end
+    local pct = 100
+    if OM.GetSetting then
+        pct = OM:GetSetting("frameOpacity") or 100
+    end
+    if pct < 0 then pct = 0 end
+    if pct > 100 then pct = 100 end
+    local a = BACKDROP_ALPHA_MAX * (pct / 100)
+    f:SetAlpha(1)
+    f:SetBackdropColor(0, 0, 0, a)
+    -- Keep border readable even when background is fully clear
+    local borderA = 1
+    if pct <= 0 then
+        borderA = 0
+    elseif pct < 30 then
+        borderA = pct / 30
+    end
+    f:SetBackdropBorderColor(0.35, 0.35, 0.35, borderA)
+end
+UI.ApplyFrameBackgroundOpacity = ApplyFrameBackgroundOpacity
+
 local function SafeStartMoving(f)
     if not f then return end
     if f.SetClampedToScreen then
@@ -814,14 +839,7 @@ local f = CreateFrame("Frame", name, UIParent)
         SetHeaderBtnTooltip(removeBtn, "Remove window")
     end
 
-    local opacity = 1
-    if OM.GetSetting then
-        local pct = OM:GetSetting("frameOpacity") or 100
-        opacity = pct / 100
-        if opacity < 0.3 then opacity = 0.3 end
-        if opacity > 1 then opacity = 1 end
-    end
-    f:SetAlpha(opacity)
+    ApplyFrameBackgroundOpacity(f)
 
     f:Hide()
     table.insert(self.frames, f)
@@ -1263,16 +1281,9 @@ function UI:RefreshFrame(f)
 end
 
 function UI:ApplySettingsToFrames()
-    local opacity = 1
-    if OM.GetSetting then
-        local pct = OM:GetSetting("frameOpacity") or 100
-        opacity = pct / 100
-        if opacity < 0.3 then opacity = 0.3 end
-        if opacity > 1 then opacity = 1 end
-    end
     local _, f
     for _, f in ipairs(self.frames) do
-        f:SetAlpha(opacity)
+        ApplyFrameBackgroundOpacity(f)
         if f:IsShown() then
             self:RefreshFrame(f)
         else

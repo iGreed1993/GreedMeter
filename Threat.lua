@@ -1860,7 +1860,8 @@ function Threat:GetSortedList(hiddenNames, mode)
 
     local cached = self.listCache and self.listCache[view]
     -- Tank list includes live flee/HP probes — reuse briefly, then rebuild
-    local maxAge = (view == "tank") and 0.5 or 30
+    -- Single-target must refresh often so targettarget (aggro) switches show up
+    local maxAge = 0.5
     if cached and cached.gen == gen and cached.list then
         local age = GetTime() - (cached.time or 0)
         if age <= maxAge then
@@ -1876,10 +1877,41 @@ function Threat:GetSortedList(hiddenNames, mode)
         list = self:BuildOverallList(nil)
     else
         -- Single-target Threat mode → players + Pull Aggro row
+        -- Live aggro always comes from who the enemy is attacking right now.
+        -- Estimates/API numbers can lag; targettarget is ground truth for "has threat".
+        local aggroName = nil
+        if UnitExists("target") and UnitExists("targettarget")
+            and not UnitIsDead("targettarget") then
+            aggroName = UnitName("targettarget")
+        end
+        -- When using pet as tank and looking at pet's mob, prefer pettargettarget
+        if PetAsTankEnabled() and UnitExists("pettarget") and UnitExists("pettargettarget")
+            and not UnitIsDead("pettargettarget") then
+            -- If player has no target or target is the pet's mob, use pet's aggro target
+            if not aggroName or (UnitExists("target") and UnitIsUnit("target", "pettarget")) then
+                aggroName = UnitName("pettargettarget")
+            end
+        end
+
+        -- If the live aggro holder changed, force a fresh list even if dataGen is stale
+        if aggroName ~= self._lastAggroName then
+            self._lastAggroName = aggroName
+            -- don't return cached below — we're already past the cache check with a rebuild
+        end
+
         list = {}
         local name, data
         for name, data in pairs(self.threats) do
             local value = data.threat or 0
+            if not data.isPull then
+                -- Override tank flag from live unit targeting
+                if aggroName and name == aggroName then
+                    data.tank = true
+                    self.tankName = name
+                else
+                    data.tank = false
+                end
+            end
             if value > 0 or data.tank or data.isPull then
                 table.insert(list, {
                     name  = name,
@@ -1889,21 +1921,45 @@ function Threat:GetSortedList(hiddenNames, mode)
             end
         end
 
+        -- If the mob is on someone not yet in the threat table (common mid-estimate),
+        -- inject a row so they still appear at the top.
+        if aggroName and not self.threats[aggroName] then
+            local injected = {
+                threat    = 1,
+                perc      = 100,
+                tank      = true,
+                tps       = 0,
+                melee     = false,
+                class     = GetPlayerClass(aggroName),
+                estimated = true,
+            }
+            self.threats[aggroName] = injected
+            self.tankName = aggroName
+            table.insert(list, {
+                name  = aggroName,
+                data  = injected,
+                value = 1,
+            })
+        end
+
         table.sort(list, function(a, b)
-            if a.data and a.data.isPull and b.data and b.data.tank then
-                return false
-            end
-            if b.data and b.data.isPull and a.data and a.data.tank then
-                return true
-            end
-            if a.data and a.data.isPull then
+            local aPull = a.data and a.data.isPull
+            local bPull = b.data and b.data.isPull
+            local aTank = a.data and a.data.tank and not aPull
+            local bTank = b.data and b.data.tank and not bPull
+
+            -- Whoever currently has aggro is always first (above Pull Aggro too)
+            if aTank and not bTank then return true end
+            if bTank and not aTank then return false end
+
+            if aPull and not bPull then
                 return a.value > (b.value or 0)
             end
-            if b.data and b.data.isPull then
+            if bPull and not aPull then
                 return (a.value or 0) > b.value
             end
             if a.value == b.value then
-                return a.name < b.name
+                return (a.name or "") < (b.name or "")
             end
             return a.value > b.value
         end)
@@ -3097,6 +3153,26 @@ eventFrame:SetScript("OnUpdate", function()
     local groupCombat = IsGroupInCombat() or (targetCombat and true or false)
     local hostileTarget = HasHostileTarget()
     local apiTarget = IsThreatApiTarget()
+
+    -- Aggro holder changed → rebuild threat list ranking immediately
+    local liveAggro = nil
+    if UnitExists("target") and UnitExists("targettarget") and not UnitIsDead("targettarget") then
+        liveAggro = UnitName("targettarget")
+    end
+    if liveAggro ~= Threat._lastAggroName then
+        Threat._lastAggroName = liveAggro
+        -- Update tank flags on the live table so any open window re-sorts
+        local n, d
+        for n, d in pairs(Threat.threats) do
+            if d and not d.isPull then
+                d.tank = (liveAggro and n == liveAggro) or false
+            end
+        end
+        if liveAggro then
+            Threat.tankName = liveAggro
+        end
+        InvalidateThreatCaches()
+    end
 
     -- Group combat session: start/stop with the party/target, not only local regen.
     if groupCombat and not Threat.groupCombat then

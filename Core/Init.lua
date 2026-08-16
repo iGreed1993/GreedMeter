@@ -84,6 +84,75 @@ function OM:ResetData()
     self:Fire("OnReset")
 end
 
+-- Group type for Party Reset: "solo" | "party" | "raid"
+local function CurrentGroupType()
+    local nRaid = GetNumRaidMembers and GetNumRaidMembers() or 0
+    if nRaid and nRaid > 0 then
+        return "raid"
+    end
+    local nParty = GetNumPartyMembers and GetNumPartyMembers() or 0
+    if nParty and nParty > 0 then
+        return "party"
+    end
+    return "solo"
+end
+
+-- Auto-reset when joining/leaving a party or converting party→raid (not every member change).
+function OM:MaybePartyReset()
+    if not self.GetSetting or not self:GetSetting("partyReset") then
+        self._partyResetGroupType = CurrentGroupType()
+        return
+    end
+    local newType = CurrentGroupType()
+    local oldType = self._partyResetGroupType
+    self._partyResetGroupType = newType
+
+    -- First observation after load — remember only, do not reset
+    if oldType == nil then
+        return
+    end
+    if oldType == newType then
+        return
+    end
+
+    -- Meaningful transitions only
+    local shouldReset =
+        (oldType == "solo" and (newType == "party" or newType == "raid"))
+        or (newType == "solo" and (oldType == "party" or oldType == "raid"))
+        or (oldType == "party" and newType == "raid")
+        or (oldType == "raid" and newType == "party")
+    if not shouldReset then
+        return
+    end
+
+    local function doIt()
+        if OM.ResetData then
+            OM:ResetData()
+        else
+            OM:Fire("OnReset")
+        end
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Party Reset — data cleared.")
+    end
+
+    if self:GetSetting("confirmReset") then
+        StaticPopupDialogs["GREEDMETER_CONFIRM_PARTY_RESET"] = {
+            text = "Party/Raid changed.\nReset all GreedMeter data?",
+            button1 = "Yes",
+            button2 = "No",
+            OnAccept = function()
+                doIt()
+            end,
+            timeout = 0,
+            whileDead = 1,
+            hideOnEscape = 1,
+            exclusive = 1,
+        }
+        StaticPopup_Show("GREEDMETER_CONFIRM_PARTY_RESET")
+    else
+        doIt()
+    end
+end
+
 -- ============================================================
 -- Module system (simple event bus)
 -- ============================================================
@@ -133,11 +202,18 @@ frame:SetScript("OnEvent", function()
         local range = (OM.GetSetting and OM:GetSetting("combatLogRangeSetting")) or OM.combatLogRange or 200
         OM:ApplyCombatLogRange(range)
         OM:UpdateGroupRoster()
+        OM._partyResetGroupType = CurrentGroupType()
         OM:Fire("OnLoad")
         if OM.ShowSuperWoWPromptIfNeeded then
             OM:ShowSuperWoWPromptIfNeeded()
         end
-    elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" or event == "UNIT_PET" or event == "PET_BAR_UPDATE" then
+    elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
+        OM:UpdateGroupRoster()
+        OM:Fire("OnRosterUpdate")
+        if OM.MaybePartyReset then
+            OM:MaybePartyReset()
+        end
+    elseif event == "UNIT_PET" or event == "PET_BAR_UPDATE" then
         OM:UpdateGroupRoster()
         OM:Fire("OnRosterUpdate")
     elseif event == "PLAYER_REGEN_DISABLED" then
