@@ -16,6 +16,8 @@ OM.defaults = {
     fontSize = 11,
     lockFrames = false,
     showTotal = false,
+    showFightDuration = false, -- duration row at top of meter bars
+    detailedDamage = false, -- click bars for ability breakdown
     hideTitle = false,          -- Compact Header
     keepTitleInCompact = false, -- title row above the compact 1-line controls
     mergePetDamage = false, -- merge all pet ability damage into a single "Pet: Damage" entry
@@ -81,10 +83,18 @@ function OM:InitDB()
 end
 
 function OM:GetSetting(key)
+    local v
     if self.db and self.db[key] ~= nil then
-        return self.db[key]
+        v = self.db[key]
+    else
+        v = self.defaults[key]
     end
-    return self.defaults[key]
+    -- Numeric settings can occasionally be stored as strings via the slider
+    if key == "frameOpacity" or key == "barHeight" or key == "fontSize" or key == "announceLines" then
+        local n = tonumber(v)
+        if n ~= nil then return n end
+    end
+    return v
 end
 
 function OM:SetSetting(key, value)

@@ -95,14 +95,15 @@ local function ApplyFrameBackgroundOpacity(f)
     if not f or not f.SetBackdropColor then return end
     local pct = 100
     if OM.GetSetting then
-        pct = OM:GetSetting("frameOpacity") or 100
+        pct = OM:GetSetting("frameOpacity")
     end
+    pct = tonumber(pct) or 100
     if pct < 0 then pct = 0 end
     if pct > 100 then pct = 100 end
     local a = BACKDROP_ALPHA_MAX * (pct / 100)
+    -- Whole-frame alpha stays 1 so header/bars never dim with the background
     f:SetAlpha(1)
     f:SetBackdropColor(0, 0, 0, a)
-    -- Keep border readable even when background is fully clear
     local borderA = 1
     if pct <= 0 then
         borderA = 0
@@ -110,6 +111,7 @@ local function ApplyFrameBackgroundOpacity(f)
         borderA = pct / 30
     end
     f:SetBackdropBorderColor(0.35, 0.35, 0.35, borderA)
+    f._gmBgOpacityPct = pct
 end
 UI.ApplyFrameBackgroundOpacity = ApplyFrameBackgroundOpacity
 
@@ -431,8 +433,8 @@ local f = CreateFrame("Frame", name, UIParent)
         tile = true, tileSize = 16, edgeSize = 12,
         insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
-    f:SetBackdropColor(0, 0, 0, 0.80)
-    f:SetBackdropBorderColor(0.35, 0.35, 0.35, 1)
+    -- Opacity applied from saved setting (not hard-coded 0.80)
+    ApplyFrameBackgroundOpacity(f)
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
@@ -762,6 +764,25 @@ local f = CreateFrame("Frame", name, UIParent)
         bar:SetScript("OnLeave", function()
             GameTooltip:Hide()
         end)
+        bar:SetScript("OnMouseDown", function()
+            this._gmClickX, this._gmClickY = GetCursorPosition()
+        end)
+        bar:SetScript("OnMouseUp", function()
+            if arg1 ~= "LeftButton" then return end
+            if not OM.GetSetting or OM:GetSetting("detailedDamage") ~= true then return end
+            local x, y = GetCursorPosition()
+            local ox, oy = this._gmClickX, this._gmClickY
+            if ox and oy and x and y then
+                local dx = x - ox
+                local dy = y - oy
+                if dx < 0 then dx = -dx end
+                if dy < 0 then dy = -dy end
+                if dx > 8 or dy > 8 then return end -- treated as drag
+            end
+            if this.entry and UI.ShowPlayerDetail then
+                UI:ShowPlayerDetail(this.entry, f.segment, f.mode or "damage")
+            end
+        end)
 
         bar:Hide()
         f.bars[i] = bar
@@ -1055,6 +1076,9 @@ function UI:LayoutBars(f)
 end
 
 function UI:RefreshFrame(f)
+    if f then
+        ApplyFrameBackgroundOpacity(f)
+    end
     if f and f.mode and UI.IsModeEnabled and not UI.IsModeEnabled(f.mode) then
         local nextMode = (UI.FirstEnabledMode and UI.FirstEnabledMode()) or "damage"
         f.mode = nextMode
@@ -1157,13 +1181,21 @@ function UI:RefreshFrame(f)
         end
     end
 
-    -- Reserve last visible slot for Total when enabled
-    local playerSlots = fit
-    if hasTotal and fit > 1 then
-        playerSlots = fit - 1
-    elseif hasTotal and fit == 1 then
-        playerSlots = 0
+    local showDuration = OM.GetSetting and OM:GetSetting("showFightDuration") == true
+    -- Duration row only when we have a meaningful fight time
+    if showDuration and (not duration or duration <= 0) then
+        showDuration = false
     end
+
+    -- Reserve first slot for Duration, last slot for Total when enabled
+    local playerSlots = fit
+    if showDuration then
+        playerSlots = playerSlots - 1
+    end
+    if hasTotal then
+        playerSlots = playerSlots - 1
+    end
+    if playerSlots < 0 then playerSlots = 0 end
 
     -- Scroll: how far we can offset into the player list
     local playerCount = table.getn(playerList)
@@ -1194,16 +1226,53 @@ function UI:RefreshFrame(f)
 
     local shown = 0
     local i
+    local durationSlot = showDuration and 1 or 0
     for i = 1, MAX_BARS do
         local bar = f.bars[i]
         local entry = nil
-        if i <= playerSlots then
-            entry = playerList[i + scroll]
-        elseif hasTotal and i == playerSlots + 1 then
+        local isDurationRow = false
+
+        if showDuration and i == 1 then
+            isDurationRow = true
+        elseif i <= (durationSlot + playerSlots) then
+            local playerIndex = i - durationSlot
+            entry = playerList[playerIndex + scroll]
+        elseif hasTotal and i == (durationSlot + playerSlots + 1) then
             entry = totalEntry
         end
 
-        if entry and i <= fit then
+        if isDurationRow and i <= fit then
+            shown = shown + 1
+            bar:Show()
+            bar:SetValue(1)
+            local modeCol = ResolveModeColor(mode)
+            if OM.GetSetting and OM:GetSetting("buttonsColorWithMode") == true and modeCol then
+                bar:SetStatusBarColor(modeCol[1], modeCol[2], modeCol[3], 0.55)
+            else
+                -- Match the dark window background
+                bar:SetStatusBarColor(0.08, 0.08, 0.08, 0.95)
+            end
+            if bar.classIcon then bar.classIcon:Hide() end
+            if bar.nameText then
+                bar.nameText:ClearAllPoints()
+                bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
+                bar.nameText:SetText("")
+            end
+            if bar.valueText then
+                bar.valueText:ClearAllPoints()
+                bar.valueText:SetPoint("CENTER", bar, "CENTER", 0, 0)
+                bar.valueText:SetJustifyH("CENTER")
+                if UI.FormatDuration then
+                    bar.valueText:SetText(UI:FormatDuration(duration) or "")
+                else
+                    bar.valueText:SetText(tostring(math.floor((duration or 0) + 0.5)) .. "s")
+                end
+            end
+            bar.entry = nil
+            bar.mode = mode
+            bar.duration = duration
+            bar.isDurationRow = true
+        elseif entry and i <= fit then
             shown = shown + 1
             local pct = entry.value / maxVal
             if pct > 1 then pct = 1 end
@@ -1211,6 +1280,13 @@ function UI:RefreshFrame(f)
 
             bar:Show()
             bar:SetValue(pct)
+            bar.isDurationRow = nil
+            -- Restore value text to the right edge (duration row may have centered it)
+            if bar.valueText then
+                bar.valueText:ClearAllPoints()
+                bar.valueText:SetPoint("RIGHT", bar, "RIGHT", -4, 0)
+                bar.valueText:SetJustifyH("RIGHT")
+            end
             if entry.isTotal then
                 local modeCol = ResolveModeColor(mode)
                 if OM.GetSetting and OM:GetSetting("buttonsColorWithMode") == true and modeCol then
@@ -1229,7 +1305,7 @@ function UI:RefreshFrame(f)
             else
                 local r, g, b = GetClassColor(entry.name, entry.data)
                 bar:SetStatusBarColor(r, g, b, 0.9)
-                local rank = entry.rank or (i + scroll)
+                local rank = entry.rank or ((i - durationSlot) + scroll)
                 local showIcon = OM.GetSetting and OM:GetSetting("showClassIcons") and not entry.isEnemy
                 if showIcon and bar.classIcon then
                     local class = nil

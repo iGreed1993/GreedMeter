@@ -336,6 +336,10 @@ function UI:GetSegmentList()
         { key = "current", label = "Current" },
         { key = "overall", label = "Overall" },
     }
+    -- Single frozen pause snapshot (never more than one)
+    if OM.data and OM.data.paused then
+        table.insert(list, { key = "paused", label = "Paused" })
+    end
     if OM.data and OM.data.recentFights then
         for i, fight in ipairs(OM.data.recentFights) do
             local name = fight.label or ("Fight "..i)
@@ -357,6 +361,7 @@ function UI:SegmentLabel(key)
     key = key or "current"
     if key == "current" then return "Current" end
     if key == "overall" then return "Overall" end
+    if key == "paused" then return "Paused" end
     local _, _, n = string.find(key, "^recent(%d+)$")
     if n then return "Recent " .. n end
     local _, _, n2 = string.find(key, "^boss(%d+)$")

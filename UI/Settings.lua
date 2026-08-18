@@ -459,6 +459,10 @@ function UI:OnLoad()
     if self.CreateMinimapButton then
         self:CreateMinimapButton()
     end
+    -- Re-apply background opacity after restore (login / reload / zone-in)
+    if self.ApplySettingsToFrames then
+        self:ApplySettingsToFrames()
+    end
     -- Periodic refresh while shown
     if not self.ticker then
         local t = CreateFrame("Frame")
@@ -1050,6 +1054,7 @@ local function MakeSlider(parent, label, x, y, settingKey, minV, maxV, step, wid
         if step and step >= 1 then
             v = math.floor(v / step + 0.5) * step
         end
+        v = tonumber(v) or minV
         OM:SetSetting(settingKey, v)
         valText:SetText(tostring(math.floor(v + 0.5)))
         if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
@@ -1348,6 +1353,14 @@ local function CreateCustomizationFrame()
         end, 22,
         "Single-word: first 4 letters. Multi-word: first 3 of each word. Applies to all modes.")
     f.abvCb = abvCb
+    y = y - 22
+
+    MakeSettingCheckbox(content, "Show fight duration", 4, y, "showFightDuration",
+        "Show fight time as the first bar (centered, not ranked). Uses mode color when Mode Colors is on.")
+    y = y - 22
+
+    MakeSettingCheckbox(content, "Detailed damage/healing", 4, y, "detailedDamage",
+        "Click a player bar to open ability details (hits, crits, misses, min/max/avg).")
     y = y - 22
 
     MakeSettingCheckbox(content, "Class colors", 4, y, "classColors", "Color bars by player class")
