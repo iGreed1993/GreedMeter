@@ -2,7 +2,7 @@
 ## Title: GreedMeter by |cffffd700iGreed|r
 ## Notes: Lightweight combat meter for Vanilla 1.12 (Damage, Healing, Dispels, Interrupts, CC, Damage Taken, and more)
 ## Author: iGreed
-## Version: 1.2.7
+## Version: 1.2.8
 ## SavedVariables: GreedMeterDB
 ## SavedVariablesPerCharacter: GreedMeterCharDB
 
@@ -19,6 +19,7 @@ Parser\Main.lua
 # UI
 UI\Init.lua
 UI\Frames.lua
+UI\Detail.lua
 UI\Settings.lua
 
 threat.lua
