@@ -7,33 +7,38 @@
 local OM = GreedMeter
 local UI = GreedMeter.UI
 
-local COLS_DAMAGE_MELEE = {
-    { key = "name",    label = "Ability",  width = 120 },
-    { key = "hits",    label = "Hit",      width = 32 },
-    { key = "crits",   label = "Crit",     width = 32 },
-    { key = "misses",  label = "Miss",     width = 32 },
-    { key = "glances", label = "Glance",   width = 40 },
-    { key = "min",     label = "Min",      width = 40 },
-    { key = "max",     label = "Max",      width = 40 },
-    { key = "avg",     label = "Avg",      width = 40 },
-    { key = "total",   label = "Total",    width = 48 },
-}
-
-local COLS_DAMAGE_CASTER = {
+-- Unified damage columns for all classes (melee + caster edge cases)
+local COLS_DAMAGE = {
     { key = "name",     label = "Ability",  width = 120 },
-    { key = "hits",     label = "Hit",      width = 32 },
-    { key = "crits",    label = "Crit",     width = 32 },
-    { key = "resists",  label = "Resist",   width = 40 },
-    { key = "partials", label = "Partial",  width = 44 },
-    { key = "min",      label = "Min",      width = 40 },
-    { key = "max",      label = "Max",      width = 40 },
-    { key = "avg",      label = "Avg",      width = 40 },
-    { key = "total",    label = "Total",    width = 48 },
+    { key = "hits",     label = "Hit",      width = 28 },
+    { key = "crits",    label = "Crit",     width = 28 },
+    { key = "misses",   label = "Miss",     width = 28 },
+    { key = "blocks",   label = "Block",    width = 32 },
+    { key = "glances",  label = "Glance",   width = 36 },
+    { key = "resists",  label = "Resist",   width = 36 },
+    { key = "partials", label = "Partial",  width = 40 },
+    { key = "min",      label = "Min",      width = 36 },
+    { key = "max",      label = "Max",      width = 36 },
+    { key = "avg",      label = "Avg",      width = 36 },
+    { key = "total",    label = "Total",    width = 44 },
 }
 
--- Physical / melee-style avoidances vs spell resists
-local MELEE_CLASSES = {
-    WARRIOR = true, ROGUE = true, HUNTER = true, PALADIN = true,
+local COLS_TAKEN = {
+    { key = "name",     label = "Ability",  width = 110 },
+    { key = "hits",     label = "Hit",      width = 26 },
+    { key = "crits",    label = "Crit",     width = 26 },
+    { key = "misses",   label = "Miss",     width = 26 },
+    { key = "dodges",   label = "Dodge",    width = 32 },
+    { key = "parries",  label = "Parry",    width = 28 },
+    { key = "blocks",   label = "Block",    width = 28 },
+    { key = "glances",  label = "Glance",   width = 32 },
+    { key = "crushes",  label = "Crush",    width = 30 },
+    { key = "resists",  label = "Resist",   width = 32 },
+    { key = "partials", label = "Partial",  width = 36 },
+    { key = "min",      label = "Min",      width = 32 },
+    { key = "max",      label = "Max",      width = 32 },
+    { key = "avg",      label = "Avg",      width = 32 },
+    { key = "total",    label = "Total",    width = 40 },
 }
 
 local COLS_HEAL = {
@@ -46,7 +51,7 @@ local COLS_HEAL = {
     { key = "total", label = "Total",   width = 52 },
 }
 
-local TARGET_COL_W = 110
+local TARGET_COL_W = 118
 
 local function FormatNum(n)
     n = tonumber(n) or 0
@@ -86,41 +91,48 @@ local function ApplyDetailLayout(f)
     end
 end
 
-local function IsMeleeClass(class)
-    if not class then return true end
-    return MELEE_CLASSES[class] and true or false
-end
-
-local function GetCols(isHeal, class)
+local function GetCols(isHeal, class, isTaken)
+    if isTaken then return COLS_TAKEN end
     if isHeal then return COLS_HEAL end
-    if IsMeleeClass(class) then
-        return COLS_DAMAGE_MELEE
-    end
-    return COLS_DAMAGE_CASTER
+    return COLS_DAMAGE
 end
 
 local function CellText(row, key)
     if key == "name" then return row.name or "" end
-    if key == "hits" or key == "crits" or key == "misses" or key == "glances"
+    if key == "hits" or key == "crits" or key == "misses" or key == "dodges"
+        or key == "parries" or key == "blocks" or key == "glances" or key == "crushes"
         or key == "resists" or key == "partials" then
         return tostring(row[key] or 0)
     end
     return FormatNum(row[key] or 0)
 end
 
-local function StatsToRow(spell, d)
+local function StatsToRow(spell, d, foldAvoidIntoMiss)
     if not d then return nil end
     local count = d.count or 0
     local avg = 0
     if count > 0 then
         avg = (d.total or 0) / count
     end
+    local misses = d.misses or 0
+    local dodges = d.dodges or 0
+    local parries = d.parries or 0
+    -- Damage-done detail: dodge/parry count under Miss (taken keeps them separate)
+    if foldAvoidIntoMiss then
+        misses = misses + dodges + parries
+        dodges = 0
+        parries = 0
+    end
     return {
         name = spell,
         hits = d.hits or 0,
         crits = d.crits or 0,
-        misses = d.misses or 0,
+        misses = misses,
+        dodges = dodges,
+        parries = parries,
+        blocks = d.blocks or 0,
         glances = d.glances or 0,
+        crushes = d.crushes or 0,
         resists = d.resists or 0,
         partials = d.partials or 0,
         min = d.min or 0,
@@ -133,7 +145,9 @@ end
 -- targetFilter: nil or "All" = full spell totals; otherwise per-target bucket
 local function BuildRows(playerData, preferHeal, targetFilter)
     local bag = nil
-    if preferHeal and playerData.healSpellDetails and next(playerData.healSpellDetails) then
+    if playerData._detailTaken and playerData.takenSpellDetails then
+        bag = playerData.takenSpellDetails
+    elseif preferHeal and playerData.healSpellDetails and next(playerData.healSpellDetails) then
         bag = playerData.healSpellDetails
     elseif playerData.damageSpellDetails and next(playerData.damageSpellDetails) then
         bag = playerData.damageSpellDetails
@@ -154,9 +168,11 @@ local function BuildRows(playerData, preferHeal, targetFilter)
                 src = d.byTarget and d.byTarget[filter] or nil
             end
             if src then
-                local row = StatsToRow(spell, src)
+                local foldMiss = not playerData._detailTaken
+                local row = StatsToRow(spell, src, foldMiss)
                 if row and ((row.total or 0) > 0 or (row.hits or 0) > 0 or (row.crits or 0) > 0
-                    or (row.misses or 0) > 0 or (row.glances or 0) > 0
+                    or (row.misses or 0) > 0 or (row.dodges or 0) > 0 or (row.parries or 0) > 0
+                    or (row.blocks or 0) > 0 or (row.glances or 0) > 0 or (row.crushes or 0) > 0
                     or (row.resists or 0) > 0 or (row.partials or 0) > 0) then
                     table.insert(rows, row)
                 end
@@ -172,9 +188,14 @@ local function BuildRows(playerData, preferHeal, targetFilter)
     return rows
 end
 
-local function BuildTargetList(playerData, preferHeal)
+local function BuildTargetList(playerData, preferHeal, isTaken)
     local totals = {} -- [name] = amount
-    local map = preferHeal and playerData.healingTo or playerData.damageTo
+    local map
+    if isTaken then
+        map = playerData.damageTakenBy
+    else
+        map = preferHeal and playerData.healingTo or playerData.damageTo
+    end
     if map then
         local n, v
         for n, v in pairs(map) do
@@ -182,7 +203,12 @@ local function BuildTargetList(playerData, preferHeal)
         end
     end
     -- Also collect from byTarget in spell details (covers misses with 0 damage)
-    local bag = preferHeal and playerData.healSpellDetails or playerData.damageSpellDetails
+    local bag
+    if isTaken then
+        bag = playerData.takenSpellDetails
+    else
+        bag = preferHeal and playerData.healSpellDetails or playerData.damageSpellDetails
+    end
     if bag then
         local spell, d
         for spell, d in pairs(bag) do
@@ -227,22 +253,24 @@ local function LayoutHeader(f, cols)
             f.headerLabels[i] = fs
         end
         fs:ClearAllPoints()
+        -- Fixed-width slots so header text and row values share the same columns
         fs:SetPoint("LEFT", f.header, "LEFT", x, 0)
-        fs:SetWidth(col.width)
-        fs:SetJustifyH(i == 1 and "LEFT" or "CENTER")
-        fs:SetText(col.label)
+        fs:SetWidth(col.width or 40)
+        fs:SetJustifyH(col.key == "name" and "LEFT" or "CENTER")
+        fs:SetText(col.label or "")
         fs:Show()
-        x = x + col.width
+        x = x + (col.width or 40)
     end
+    f._headerWidth = x
 end
 
-local ROW_H = 14
-local HEADER_BLOCK = 60   -- title + subtitle + column headers
+local ROW_H = 26
+local HEADER_BLOCK = 66   -- title + subtitle + column headers
 local PAD_BOTTOM = 14
 local PAD_SIDES = 24
 local SCROLL_GUTTER = 18
 local MIN_FRAME_H = 110
-local MIN_FRAME_W = 420
+local MIN_FRAME_W = 560
 
 local function AbilityTableWidth(cols)
     local w = 0
@@ -255,7 +283,7 @@ end
 
 local function ResizeDetailFrame(f, rowCount, targetCount)
     if not f then return end
-    local cols = GetCols(f._isHeal, f._class)
+    local cols = GetCols(f._isHeal, f._class, f._isTaken)
     local tableW = AbilityTableWidth(cols)
     local width = PAD_SIDES + TARGET_COL_W + 8 + tableW + SCROLL_GUTTER
     if width < MIN_FRAME_W then width = MIN_FRAME_W end
@@ -265,7 +293,7 @@ local function ResizeDetailFrame(f, rowCount, targetCount)
     -- Include "All" in target count for height
     local bodyRows = rowCount
     if targetCount > bodyRows then bodyRows = targetCount end
-    local bodyH = bodyRows * ROW_H
+    local bodyH = bodyRows * (ROW_H + 4)
     local height = HEADER_BLOCK + bodyH + PAD_BOTTOM
 
     -- Cap to ~85% of screen so huge lists still scroll inside
@@ -282,9 +310,12 @@ local function ResizeDetailFrame(f, rowCount, targetCount)
     f:SetWidth(width)
     f:SetHeight(height)
 
-    -- Ability content width matches columns
+    -- Ability content + header width match the column sum exactly
     if f.content then
-        f.content:SetWidth(tableW + 4)
+        f.content:SetWidth(tableW)
+    end
+    if f.header then
+        f.header:SetWidth(tableW)
     end
     -- Scroll child heights already set by callers; ensure scroll area uses new space
     if f.scroll then
@@ -302,7 +333,7 @@ end
 
 local function RefreshAbilityRows(f)
     if not f or not f._pdata then return end
-    local cols = GetCols(f._isHeal, f._class)
+    local cols = GetCols(f._isHeal, f._class, f._isTaken)
     LayoutHeader(f, cols)
     local rows = BuildRows(f._pdata, f._isHeal, f._targetFilter)
     local content = f.content
@@ -311,77 +342,114 @@ local function RefreshAbilityRows(f)
     for i = 1, table.getn(f.rowFrames) do
         f.rowFrames[i]:Hide()
     end
-    local y = 0
+    local y = 2
+    local rowGap = 4  -- extra space so 2-line ability names do not collide
     for i = 1, table.getn(rows) do
         local row = rows[i]
         local rf = f.rowFrames[i]
         if not rf then
             rf = CreateFrame("Frame", nil, content)
-            rf:SetHeight(14)
-            rf:SetWidth(480)
+            rf:SetHeight(ROW_H)
             rf.cols = {}
+            local j
+            for j = 1, 20 do
+                local fs = rf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                rf.cols[j] = fs
+            end
+            -- Divider under each ability row
+            local line = rf:CreateTexture(nil, "ARTWORK")
+            line:SetTexture("Interface\\Buttons\\WHITE8X8")
+            if not line.GetTexture or not line:GetTexture() then
+                line:SetTexture("Interface\\Tooltips\\UI-Tooltip-Background")
+            end
+            line:SetVertexColor(1, 1, 1, 0.22)
+            line:SetHeight(1)
+            line:SetPoint("BOTTOMLEFT", rf, "BOTTOMLEFT", 0, 0)
+            line:SetPoint("BOTTOMRIGHT", rf, "BOTTOMRIGHT", 0, 0)
+            rf.divLine = line
             f.rowFrames[i] = rf
         end
-        local c
-        for c = 1, table.getn(cols) do
-            if not rf.cols[c] then
-                rf.cols[c] = rf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            end
-        end
-        for c = table.getn(cols) + 1, table.getn(rf.cols) do
-            if rf.cols[c] then rf.cols[c]:Hide() end
-        end
+        rf:SetHeight(ROW_H)
+        rf:Show()
         local x = 0
-        for c = 1, table.getn(cols) do
-            local col = cols[c]
-            local fs = rf.cols[c]
+        local j
+        for j = 1, table.getn(cols) do
+            local col = cols[j]
+            local fs = rf.cols[j]
+            if not fs then
+                fs = rf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                rf.cols[j] = fs
+            end
             fs:ClearAllPoints()
-            fs:SetPoint("LEFT", rf, "LEFT", x, 0)
-            fs:SetWidth(col.width)
-            fs:SetJustifyH(c == 1 and "LEFT" or "CENTER")
+            -- Same left origin + width as LayoutHeader for this column index
+            fs:SetWidth(col.width or 40)
+            if col.key == "name" then
+                fs:SetJustifyH("LEFT")
+                fs:SetJustifyV("TOP")
+                fs:SetPoint("TOPLEFT", rf, "TOPLEFT", x, -2)
+                fs:SetHeight(ROW_H - 4)
+            else
+                -- Center numeric values under centered headers
+                fs:SetJustifyH("CENTER")
+                fs:SetJustifyV("MIDDLE")
+                fs:SetPoint("LEFT", rf, "LEFT", x, 0)
+                fs:SetHeight(ROW_H)
+            end
             fs:SetText(CellText(row, col.key))
             fs:Show()
-            x = x + col.width
+            x = x + (col.width or 40)
         end
-        rf:Show()
+        -- Hide unused cols
+        for j = table.getn(cols) + 1, table.getn(rf.cols) do
+            if rf.cols[j] then rf.cols[j]:Hide() end
+        end
+        if rf.divLine then
+            rf.divLine:Show()
+            rf.divLine:SetVertexColor(1, 1, 1, 0.22)
+        end
+        rf:SetWidth(x)
         rf:ClearAllPoints()
         rf:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -y)
-        y = y + 14
+        y = y + ROW_H + rowGap
     end
     if table.getn(rows) == 0 then
         local rf = f.rowFrames[1]
         if not rf then
             rf = CreateFrame("Frame", nil, content)
-            rf:SetHeight(14)
-            rf:SetWidth(480)
-            local fs = rf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            fs:SetPoint("LEFT", rf, "LEFT", 0, 0)
-            rf.empty = fs
+            rf:SetHeight(ROW_H)
             rf.cols = {}
+            local fs = rf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            fs:SetJustifyH("LEFT")
+            rf.cols[1] = fs
             f.rowFrames[1] = rf
         end
         rf:Show()
+        rf:SetHeight(ROW_H)
         rf:ClearAllPoints()
         rf:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
-        local msg = "No ability detail for this target."
-        if not f._targetFilter or f._targetFilter == "All" then
-            msg = "No ability detail yet (needs combat after enabling)."
-        end
-        if rf.empty then
-            rf.empty:SetText(msg)
-        elseif rf.cols[1] then
+        if rf.cols[1] then
+            rf.cols[1]:ClearAllPoints()
+            rf.cols[1]:SetPoint("LEFT", rf, "LEFT", 0, 0)
+            local msg = "No ability detail for this target."
+            if not f._targetFilter or f._targetFilter == "All" then
+                msg = "No ability detail yet (needs combat after enabling)."
+            end
             rf.cols[1]:SetText(msg)
-            for i = 2, table.getn(rf.cols) do rf.cols[i]:SetText("") end
+            local j
+            for j = 2, table.getn(rf.cols) do
+                if rf.cols[j] then rf.cols[j]:SetText("") end
+            end
         end
-        y = 14
+        y = ROW_H + 4
     end
     content:SetHeight(math.max(y, ROW_H))
     if f.scroll then f.scroll:SetVerticalScroll(0) end
-    local rowCount = math.floor(y / ROW_H)
+    local rowCount = table.getn(rows)
     if rowCount < 1 then rowCount = 1 end
     local tgtCount = f._targetCount or 1
     ResizeDetailFrame(f, rowCount, tgtCount)
 end
+
 
 local function HighlightTargetButtons(f)
     if not f or not f.targetButtons then return end
@@ -405,24 +473,34 @@ local function LayoutTargets(f, targets)
     for i = 1, table.getn(f.targetButtons) do
         f.targetButtons[i]:Hide()
     end
-    -- All first
-    local entries = { { name = "All", total = 0 } }
+    local entries = {}
+    table.insert(entries, { name = "All", amount = 0 })
     for i = 1, table.getn(targets) do
         table.insert(entries, targets[i])
     end
-    local y = 0
+    local y = 2
+    local btnH = 20
+    local btnGap = 4
     for i = 1, table.getn(entries) do
         local e = entries[i]
         local btn = f.targetButtons[i]
         if not btn then
             btn = CreateFrame("Button", nil, f.targetList)
-            btn:SetHeight(14)
-            btn:SetWidth(TARGET_COL_W - 4)
+            btn:SetHeight(btnH)
+            btn:SetWidth(TARGET_COL_W - 8)
+            btn:SetBackdrop({
+                bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+                edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                tile = true, tileSize = 8, edgeSize = 10,
+                insets = { left = 2, right = 2, top = 2, bottom = 2 },
+            })
+            btn:SetBackdropColor(0.08, 0.08, 0.1, 0.85)
+            btn:SetBackdropBorderColor(0.45, 0.45, 0.5, 0.9)
             local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            fs:SetAllPoints(btn)
+            fs:SetPoint("LEFT", btn, "LEFT", 6, 0)
+            fs:SetPoint("RIGHT", btn, "RIGHT", -4, 0)
             fs:SetJustifyH("LEFT")
-            btn.text = fs
-            btn:SetFontString(fs)
+            btn.label = fs
             btn:SetScript("OnClick", function()
                 local frame = f
                 local name = this.targetName
@@ -438,19 +516,24 @@ local function LayoutTargets(f, targets)
         end
         btn.targetName = e.name
         local label = e.name
-        if e.name ~= "All" and e.total and e.total > 0 then
-            label = e.name
+        if e.amount and e.amount > 0 and e.name ~= "All" then
+            label = e.name -- keep name readable; amount optional later
         end
-        btn.text:SetText(label)
+        if btn.label then
+            btn.label:SetText(label)
+        end
         btn:ClearAllPoints()
         btn:SetPoint("TOPLEFT", f.targetList, "TOPLEFT", 2, -y)
+        btn:SetHeight(btnH)
+        btn:SetWidth(TARGET_COL_W - 8)
         btn:Show()
-        y = y + 14
+        y = y + btnH + btnGap
     end
     f.targetList:SetHeight(math.max(y, ROW_H))
     f._targetCount = table.getn(entries)
     HighlightTargetButtons(f)
 end
+
 
 function UI:CreateDetailFrame()
     if self.detailFrame then return self.detailFrame end
@@ -553,7 +636,7 @@ function UI:CreateDetailFrame()
 end
 
 function UI:ShowPlayerDetail(entry, segmentKey, mode)
-    if not OM.GetSetting or OM:GetSetting("detailedDamage") ~= true then
+    if not OM.GetSetting or not OM:GetSetting("detailedDamage") then
         return
     end
     if not entry or entry.isTotal or entry.isDurationRow then return end
@@ -576,15 +659,25 @@ function UI:ShowPlayerDetail(entry, segmentKey, mode)
     end
 
     local preferHeal = (mode == "healing")
+    local isTaken = (mode == "taken")
     local f = self:CreateDetailFrame()
-    local kind = preferHeal and "Healing" or "Damage"
-    if preferHeal and (not pdata.healSpellDetails or not next(pdata.healSpellDetails)) then
-        kind = "Damage"
+    local kind = "Damage"
+    if isTaken then
+        kind = "Damage Taken"
         preferHeal = false
+    elseif preferHeal then
+        kind = "Healing"
+        if not pdata.healSpellDetails or not next(pdata.healSpellDetails) then
+            kind = "Damage"
+            preferHeal = false
+        end
     end
 
+    -- Tag pdata so BuildRows can pick takenSpellDetails
+    pdata._detailTaken = isTaken and true or nil
     f._pdata = pdata
     f._isHeal = (kind == "Healing")
+    f._isTaken = isTaken and true or nil
     f._class = pdata.class or (entry.data and entry.data.class) or nil
     if not f._class and OM.players and OM.players[name] then
         f._class = OM.players[name].class
@@ -626,7 +719,7 @@ function UI:ShowPlayerDetail(entry, segmentKey, mode)
         end
     end
 
-    local targets = BuildTargetList(pdata, f._isHeal)
+    local targets = BuildTargetList(pdata, f._isHeal, f._isTaken)
     LayoutTargets(f, targets)
     RefreshAbilityRows(f)
 

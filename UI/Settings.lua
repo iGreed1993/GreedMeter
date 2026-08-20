@@ -1360,7 +1360,7 @@ local function CreateCustomizationFrame()
     y = y - 22
 
     MakeSettingCheckbox(content, "Detailed damage/healing", 4, y, "detailedDamage",
-        "Click a player bar to open ability details (hits, crits, misses, min/max/avg).")
+        "OFF by default. When enabled, left-click anywhere on a player bar (not Total/Duration) to open ability details.")
     y = y - 22
 
     MakeSettingCheckbox(content, "Class colors", 4, y, "classColors", "Color bars by player class")

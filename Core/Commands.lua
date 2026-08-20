@@ -145,15 +145,14 @@ function OM:LoadTestData()
         seed = seed or 1
         local hits = 8 + math.mod(seed * 3, 20)
         local crits = 1 + math.mod(seed, 6)
-        local misses, glances, resists, partials = 0, 0, 0, 0
+        local misses, blocks, glances, resists, partials = 0, 0, 0, 0, 0
         if not isHeal then
-            if isMelee then
-                misses = math.mod(seed, 4)
-                glances = math.mod(seed + 1, 3)
-            else
-                resists = math.mod(seed, 5)
-                partials = 1 + math.mod(seed + 2, 4)
-            end
+            -- Everyone gets a mix so the unified table is easy to verify
+            misses = math.mod(seed, 4)
+            blocks = math.mod(seed + 3, 3)
+            glances = math.mod(seed + 1, 3)
+            resists = math.mod(seed, 5)
+            partials = 1 + math.mod(seed + 2, 4)
         end
         local count = hits + crits + glances
         if count < 1 then count = 1 end
@@ -166,6 +165,7 @@ function OM:LoadTestData()
             hits = hits,
             crits = crits,
             misses = misses,
+            blocks = blocks,
             glances = glances,
             resists = resists,
             partials = partials,
@@ -215,6 +215,7 @@ function OM:LoadTestData()
                 hits = tHits,
                 crits = tCrits,
                 misses = (ti == 1) and (detail.misses or 0) or 0,
+                blocks = (ti == 1) and (detail.blocks or 0) or 0,
                 glances = tGlances,
                 resists = (ti == 1) and (detail.resists or 0) or 0,
                 partials = (ti == 1) and (detail.partials or 0) or 0,

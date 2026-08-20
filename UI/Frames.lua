@@ -750,6 +750,7 @@ local f = CreateFrame("Frame", name, UIParent)
         bar:EnableMouse(true)
         bar:RegisterForDrag("LeftButton")
         bar:SetScript("OnDragStart", function()
+            this._gmDragged = true
             if FramesLocked() then return end
             CloseDropdown()
             SafeStartMoving(f)
@@ -766,10 +767,15 @@ local f = CreateFrame("Frame", name, UIParent)
         end)
         bar:SetScript("OnMouseDown", function()
             this._gmClickX, this._gmClickY = GetCursorPosition()
+            this._gmDragged = nil
         end)
         bar:SetScript("OnMouseUp", function()
             if arg1 ~= "LeftButton" then return end
-            if not OM.GetSetting or OM:GetSetting("detailedDamage") ~= true then return end
+            -- Real drag (window move) — do not open detail
+            if this._gmDragged then
+                this._gmDragged = nil
+                return
+            end
             local x, y = GetCursorPosition()
             local ox, oy = this._gmClickX, this._gmClickY
             if ox and oy and x and y then
@@ -777,9 +783,28 @@ local f = CreateFrame("Frame", name, UIParent)
                 local dy = y - oy
                 if dx < 0 then dx = -dx end
                 if dy < 0 then dy = -dy end
-                if dx > 8 or dy > 8 then return end -- treated as drag
+                -- Cursor coords are screen pixels; keep threshold scale-aware so
+                -- high-res clients are not treated as drags on tiny jitter
+                local scale = 1
+                if UIParent and UIParent.GetEffectiveScale then
+                    scale = UIParent:GetEffectiveScale() or 1
+                end
+                if scale < 0.5 then scale = 0.5 end
+                local thresh = 24 * scale
+                if thresh < 16 then thresh = 16 end
+                if dx > thresh or dy > thresh then return end
             end
-            if this.entry and UI.ShowPlayerDetail then
+            if not this.entry or this.entry.isTotal or this.isDurationRow then
+                return
+            end
+            if not OM.GetSetting or not OM:GetSetting("detailedDamage") then
+                if not UI._detailHintShown then
+                    UI._detailHintShown = true
+                    DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Enable |cffffffffDetailed damage/healing|r in Customization, then click a player bar.")
+                end
+                return
+            end
+            if UI.ShowPlayerDetail then
                 UI:ShowPlayerDetail(this.entry, f.segment, f.mode or "damage")
             end
         end)

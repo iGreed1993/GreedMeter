@@ -9,6 +9,13 @@ local Parser = {}
 GreedMeter.ParserNS = GreedMeter.ParserNS or {}
 GreedMeter.ParserNS.Parser = Parser
 
+-- Lua 5.0 allows only 32 upvalues per function. Keep shared helpers/state on
+-- these tables so large functions (ParseMessage, etc.) close over ~1-2 upvalues.
+local H = {} -- helper bag
+local ST = {} -- fight/parser state bag
+H.getPlayerName = function() return ST.playerName or UnitName("player") end
+H.NormalizeName = function(n) return n end -- replaced after real NormalizeName exists
+
 -- ============================================================
 -- Data storage (per segment)
 -- ============================================================
@@ -30,18 +37,19 @@ local MAX_BOSS_FIGHTS = 5
 local MAX_DETAIL_LIST = 80   -- dispels / interrupts / ccBreaks / per-enemy CC applications
 local MAX_DEATHS_LIST = 40
 
--- Per-fight enemy tracking for naming + boss detection
-local fightEnemies = {}        -- [name] = damage dealt to them by group
-local fightEnemyDeaths = {}    -- [name] = how many times this name died this fight
-local fightDuplicateNames = {} -- [name] = true if name is not unique (pack trash)
-local fightIsBoss = false
-local fightBossName = nil
+-- Per-fight enemy tracking for naming + boss detection (on ST for upvalue relief)
+ST.fightEnemies = {}        -- [name] = damage dealt to them by group
+ST.fightEnemyDeaths = {}    -- [name] = how many times this name died this fight
+ST.fightDuplicateNames = {} -- [name] = true if name is not unique (pack trash)
+ST.fightIsBoss = false
+ST.fightBossName = nil
 
 -- ============================================================
 -- Helpers
 -- ============================================================
 
-local playerName = nil
+ST.playerName = nil
+local playerName = nil -- mirrored; prefer ST.playerName in new code
 
 -- Optional mode gates (Advanced Customization "Enabled" checkboxes).
 -- When a mode is disabled we skip storing its metrics to save CPU/memory.
@@ -70,6 +78,8 @@ end
 
 -- Exact match first, then substring (handles rank suffixes / variants).
 -- Used by absorb / interrupt / dispel / CC spell tables.
+H.NormalizeName = NormalizeName
+
 local function SpellLookup(set, spell)
     if not spell or not set then return nil end
     local v = set[spell]
@@ -328,12 +338,12 @@ local ABSORB_SHIELDS = {
     ["Fire Ward"] = true,
 }
 
--- absorbAuras[targetName] = { [shieldName] = applicatorName }
-local absorbAuras = {}
--- recentAbsorbCaster[spellName] = { name = "Caster", time = GetTime() }
-local recentAbsorbCaster = {}
--- recentShieldByTarget[targetName] = { caster = "Caster", spell = "...", time = GetTime() }
-local recentShieldByTarget = {}
+-- ST.absorbAuras[targetName] = { [shieldName] = applicatorName }
+ST.absorbAuras = {}
+-- ST.recentAbsorbCaster[spellName] = { name = "Caster", time = GetTime() }
+ST.recentAbsorbCaster = {}
+-- ST.recentShieldByTarget[targetName] = { caster = "Caster", spell = "...", time = GetTime() }
+ST.recentShieldByTarget = {}
 local RECENT_CASTER_TIMEOUT = 8
 
 local function IsAbsorbShield(spell)
@@ -343,13 +353,13 @@ end
 local function NoteRecentAbsorbCaster(spell, caster, target)
     if not spell or not caster or not IsAbsorbShield(spell) then return end
     caster = NormalizeName(caster)
-    recentAbsorbCaster[spell] = {
+    ST.recentAbsorbCaster[spell] = {
         name = caster,
         time = GetTime(),
     }
     target = NormalizeName(target)
     if target then
-        recentShieldByTarget[target] = {
+        ST.recentShieldByTarget[target] = {
             caster = caster,
             spell = spell,
             time = GetTime(),
@@ -359,9 +369,9 @@ end
 
 local function GetRecentAbsorbCaster(spell)
     if not spell then return nil end
-    local entry = recentAbsorbCaster[spell]
+    local entry = ST.recentAbsorbCaster[spell]
     if not entry then
-        for s, e in pairs(recentAbsorbCaster) do
+        for s, e in pairs(ST.recentAbsorbCaster) do
             if string.find(spell, s, 1, true) or string.find(s, spell, 1, true) then
                 entry = e
                 break
@@ -378,33 +388,33 @@ local function SetAbsorbAura(target, spell, applicator)
     target = NormalizeName(target)
     applicator = NormalizeName(applicator)
     if not target or not spell or not applicator then return end
-    if not absorbAuras[target] then
-        absorbAuras[target] = {}
+    if not ST.absorbAuras[target] then
+        ST.absorbAuras[target] = {}
     end
-    absorbAuras[target][spell] = applicator
+    ST.absorbAuras[target][spell] = applicator
 end
 
 local function ClearAbsorbAura(target, spell)
     target = NormalizeName(target)
-    if not target or not absorbAuras[target] then return end
+    if not target or not ST.absorbAuras[target] then return end
     if spell then
-        for name, _ in pairs(absorbAuras[target]) do
+        for name, _ in pairs(ST.absorbAuras[target]) do
             if name == spell or string.find(name, spell, 1, true) or string.find(spell, name, 1, true) then
-                absorbAuras[target][name] = nil
+                ST.absorbAuras[target][name] = nil
             end
         end
         local empty = true
-        for _ in pairs(absorbAuras[target]) do empty = false break end
-        if empty then absorbAuras[target] = nil end
+        for _ in pairs(ST.absorbAuras[target]) do empty = false break end
+        if empty then ST.absorbAuras[target] = nil end
     else
-        absorbAuras[target] = nil
+        ST.absorbAuras[target] = nil
     end
 end
 
 local function GetAbsorbApplicator(buffedUnit)
     buffedUnit = NormalizeName(buffedUnit)
-    if not buffedUnit or not absorbAuras[buffedUnit] then return nil, nil end
-    for spell, applicator in pairs(absorbAuras[buffedUnit]) do
+    if not buffedUnit or not ST.absorbAuras[buffedUnit] then return nil, nil end
+    for spell, applicator in pairs(ST.absorbAuras[buffedUnit]) do
         if applicator then
             return applicator, spell
         end
@@ -461,8 +471,8 @@ end
 
 local function IsUniqueEnemyName(name)
     if not name then return false end
-    if fightDuplicateNames[name] then return false end
-    local deaths = fightEnemyDeaths[name] or 0
+    if ST.fightDuplicateNames[name] then return false end
+    local deaths = ST.fightEnemyDeaths[name] or 0
     -- 2+ deaths of the same name = pack trash, not a unique boss
     if deaths >= 2 then return false end
     return true
@@ -470,11 +480,11 @@ end
 
 local function MarkDuplicateName(name)
     if not name then return end
-    fightDuplicateNames[name] = true
+    ST.fightDuplicateNames[name] = true
     -- If we had flagged this name as the boss, clear it
-    if fightBossName == name then
-        fightIsBoss = false
-        fightBossName = nil
+    if ST.fightBossName == name then
+        ST.fightIsBoss = false
+        ST.fightBossName = nil
         -- Try to recover another unique boss candidate from enemies hit
         -- (left for combat-end / next elite hit)
     end
@@ -483,8 +493,8 @@ end
 local function NoteEnemyDeath(name)
     name = NormalizeName(name)
     if not name or OM.players[name] then return end
-    fightEnemyDeaths[name] = (fightEnemyDeaths[name] or 0) + 1
-    if fightEnemyDeaths[name] >= 2 then
+    ST.fightEnemyDeaths[name] = (ST.fightEnemyDeaths[name] or 0) + 1
+    if ST.fightEnemyDeaths[name] >= 2 then
         MarkDuplicateName(name)
     end
 end
@@ -537,7 +547,7 @@ local function NoteEnemyHit(enemyName, amount)
     enemyName = NormalizeName(enemyName)
     if not enemyName or OM.players[enemyName] then return end
     amount = tonumber(amount) or 0
-    fightEnemies[enemyName] = (fightEnemies[enemyName] or 0) + amount
+    ST.fightEnemies[enemyName] = (ST.fightEnemies[enemyName] or 0) + amount
 
     -- Never promote non-unique names to boss
     if not IsUniqueEnemyName(enemyName) then
@@ -547,8 +557,8 @@ local function NoteEnemyHit(enemyName, amount)
     local units = { "target", "targettarget", "pettarget", "mouseover" }
     for _, u in ipairs(units) do
         if UnitExists(u) and UnitName(u) == enemyName and UnitLooksLikeBoss(u) then
-            fightIsBoss = true
-            fightBossName = enemyName
+            ST.fightIsBoss = true
+            ST.fightBossName = enemyName
             break
         end
     end
@@ -573,6 +583,7 @@ local function DeepCopyPlayerData(data)
         healSpells = {},
         damageSpellDetails = {},
         healSpellDetails = {},
+        takenSpellDetails = {},
         class = data.class,
         dpsSum = data.dpsSum or 0,
         dpsSamples = data.dpsSamples or 0,
@@ -662,7 +673,8 @@ local function DeepCopyPlayerData(data)
             if type(d) == "table" then
                 local copy = {
                     hits = d.hits or 0, crits = d.crits or 0,
-                    misses = d.misses or 0, glances = d.glances or 0,
+                    misses = d.misses or 0, dodges = d.dodges or 0, parries = d.parries or 0,
+                    blocks = d.blocks or 0, glances = d.glances or 0, crushes = d.crushes or 0,
                     resists = d.resists or 0, partials = d.partials or 0,
                     total = d.total or 0, count = d.count or 0,
                     min = d.min, max = d.max, byTarget = {},
@@ -673,7 +685,8 @@ local function DeepCopyPlayerData(data)
                         if type(td) == "table" then
                             copy.byTarget[tn] = {
                                 hits = td.hits or 0, crits = td.crits or 0,
-                                misses = td.misses or 0, glances = td.glances or 0,
+                                misses = td.misses or 0, dodges = td.dodges or 0, parries = td.parries or 0,
+                                blocks = td.blocks or 0, glances = td.glances or 0, crushes = td.crushes or 0,
                                 resists = td.resists or 0, partials = td.partials or 0,
                                 total = td.total or 0, count = td.count or 0,
                                 min = td.min, max = td.max,
@@ -691,7 +704,8 @@ local function DeepCopyPlayerData(data)
             if type(d) == "table" then
                 local copy = {
                     hits = d.hits or 0, crits = d.crits or 0,
-                    misses = d.misses or 0, glances = d.glances or 0,
+                    misses = d.misses or 0, dodges = d.dodges or 0, parries = d.parries or 0,
+                    blocks = d.blocks or 0, glances = d.glances or 0, crushes = d.crushes or 0,
                     resists = d.resists or 0, partials = d.partials or 0,
                     total = d.total or 0, count = d.count or 0,
                     min = d.min, max = d.max, byTarget = {},
@@ -702,7 +716,8 @@ local function DeepCopyPlayerData(data)
                         if type(td) == "table" then
                             copy.byTarget[tn] = {
                                 hits = td.hits or 0, crits = td.crits or 0,
-                                misses = td.misses or 0, glances = td.glances or 0,
+                                misses = td.misses or 0, dodges = td.dodges or 0, parries = td.parries or 0,
+                                blocks = td.blocks or 0, glances = td.glances or 0, crushes = td.crushes or 0,
                                 resists = td.resists or 0, partials = td.partials or 0,
                                 total = td.total or 0, count = td.count or 0,
                                 min = td.min, max = td.max,
@@ -714,8 +729,41 @@ local function DeepCopyPlayerData(data)
             end
         end
     end
+    if data.takenSpellDetails then
+        local spell, d
+        if not p.takenSpellDetails then p.takenSpellDetails = {} end
+        for spell, d in pairs(data.takenSpellDetails) do
+            if type(d) == "table" then
+                local copy = {
+                    hits = d.hits or 0, crits = d.crits or 0,
+                    misses = d.misses or 0, dodges = d.dodges or 0, parries = d.parries or 0,
+                    blocks = d.blocks or 0, glances = d.glances or 0, crushes = d.crushes or 0,
+                    resists = d.resists or 0, partials = d.partials or 0,
+                    total = d.total or 0, count = d.count or 0,
+                    min = d.min, max = d.max, byTarget = {},
+                }
+                if d.byTarget then
+                    local tn, td
+                    for tn, td in pairs(d.byTarget) do
+                        if type(td) == "table" then
+                            copy.byTarget[tn] = {
+                                hits = td.hits or 0, crits = td.crits or 0,
+                                misses = td.misses or 0, dodges = td.dodges or 0, parries = td.parries or 0,
+                                blocks = td.blocks or 0, glances = td.glances or 0, crushes = td.crushes or 0,
+                                resists = td.resists or 0, partials = td.partials or 0,
+                                total = td.total or 0, count = td.count or 0,
+                                min = td.min, max = td.max,
+                            }
+                        end
+                    end
+                end
+                p.takenSpellDetails[spell] = copy
+            end
+        end
+    end
     return p
 end
+
 
 local function SnapshotSegment(seg)
     local players = {}
@@ -751,11 +799,11 @@ local function SnapshotSegment(seg)
 end
 
 local function PickFightLabel()
-    if fightBossName then
-        return fightBossName
+    if ST.fightBossName then
+        return ST.fightBossName
     end
     local bestName, bestDmg = nil, -1
-    for name, dmg in pairs(fightEnemies) do
+    for name, dmg in pairs(ST.fightEnemies) do
         if dmg > bestDmg then
             bestDmg = dmg
             bestName = name
@@ -781,14 +829,14 @@ local function PushCapped(list, entry, maxCount)
 end
 
 -- Last damage dealt TO a unit (for CC break attribution + death killing blow)
--- lastHitOn[target] = { source, spell, amount, time }
-local lastHitOn = {}
+-- ST.lastHitOn[target] = { source, spell, amount, time }
+ST.lastHitOn = {}
 
 local function NoteLastHit(target, source, spell, amount)
     target = NormalizeName(target)
     source = NormalizeName(source)
     if not target then return end
-    lastHitOn[target] = {
+    ST.lastHitOn[target] = {
         source = source or "Unknown",
         spell = spell or "Melee",
         amount = amount or 0,
@@ -851,7 +899,8 @@ end
 
 local function EmptyOutcomeBucket()
     return {
-        hits = 0, crits = 0, misses = 0, glances = 0,
+        hits = 0, crits = 0, misses = 0, dodges = 0, parries = 0,
+        blocks = 0, glances = 0, crushes = 0,
         resists = 0, partials = 0,
         total = 0, count = 0, min = nil, max = nil,
     }
@@ -862,6 +911,16 @@ local function ApplyOutcomeToBucket(s, amount, hitType, partialFlag)
     if hitType == "miss" then
         s.misses = (s.misses or 0) + 1
         return
+    elseif hitType == "dodge" then
+        s.dodges = (s.dodges or 0) + 1
+        return
+    elseif hitType == "parry" then
+        s.parries = (s.parries or 0) + 1
+        return
+    elseif hitType == "block" then
+        -- Full avoid block (attack was blocked with no damage line)
+        s.blocks = (s.blocks or 0) + 1
+        return
     elseif hitType == "resist" then
         s.resists = (s.resists or 0) + 1
         return
@@ -869,6 +928,8 @@ local function ApplyOutcomeToBucket(s, amount, hitType, partialFlag)
         s.crits = (s.crits or 0) + 1
     elseif hitType == "glance" then
         s.glances = (s.glances or 0) + 1
+    elseif hitType == "crush" then
+        s.crushes = (s.crushes or 0) + 1
     else
         s.hits = (s.hits or 0) + 1
     end
@@ -884,10 +945,17 @@ local function ApplyOutcomeToBucket(s, amount, hitType, partialFlag)
     end
 end
 
-local function NoteSpellOutcome(p, spell, amount, hitType, isHeal, target, partialFlag)
+local function NoteSpellOutcome(p, spell, amount, hitType, isHeal, target, partialFlag, isTaken)
     if not p or not spell or spell == "" then return end
     hitType = hitType or "hit"
-    local bagName = isHeal and "healSpellDetails" or "damageSpellDetails"
+    local bagName
+    if isTaken then
+        bagName = "takenSpellDetails"
+    elseif isHeal then
+        bagName = "healSpellDetails"
+    else
+        bagName = "damageSpellDetails"
+    end
     if not p[bagName] then p[bagName] = {} end
     local s = p[bagName][spell]
     if not s then
@@ -992,7 +1060,32 @@ end
 -- amount = full heal from the log
 -- healing field stores EFFECTIVE healing (amount - overheal)
 -- overhealing tracked separately for later tooltip %
-function Parser:AddMiss(source, spell, target)
+function Parser:AddMiss(source, spell, target, avoidType)
+    -- avoidType: "miss" (default), "dodge", "parry", "block"
+    -- Outbound avoids (our swing/spell was avoided by the target).
+    if not ModeEnabled("damage") then return end
+    source = ResolveSource(source)
+    if not source then return end
+    local me = ST.playerName or UnitName("player")
+    if source ~= me and not (OM.players and OM.players[source]) and not IsTracked(source) then
+        return
+    end
+    spell = spell or "Auto Attack"
+    target = NormalizeName(target)
+    avoidType = avoidType or "miss"
+    local function apply(seg)
+        if not seg then return end
+        local p = EnsurePlayer(seg, source)
+        if p then
+            NoteSpellOutcome(p, spell, 0, avoidType, false, target, false)
+        end
+    end
+    apply(OM.data.current)
+    apply(OM.data.overall)
+    NoteActivity()
+end
+
+function Parser:AddBlock(source, spell, target)
     source = ResolveSource(source)
     if not source then return end
     if not OM.players[source] and not IsTracked(source) then return end
@@ -1002,7 +1095,7 @@ function Parser:AddMiss(source, spell, target)
         if not seg then return end
         local p = EnsurePlayer(seg, source)
         if p then
-            NoteSpellOutcome(p, spell, 0, "miss", false, target, false)
+            NoteSpellOutcome(p, spell, 0, "block", false, target, false)
         end
     end
     apply(OM.data and OM.data.current)
@@ -1069,26 +1162,49 @@ function Parser:AddHealing(source, amount, spell, isAbsorb, target, hitType)
     NoteActivity()
 end
 
-function Parser:AddDamageTaken(target, amount, source, spell)
+function Parser:AddDamageTaken(target, amount, source, spell, hitType, partialFlag)
     if not ModeEnabled("taken") then return end
     target = NormalizeName(target)
-    if not target or not amount or amount <= 0 then return end
+    amount = tonumber(amount) or 0
+    if not target or amount <= 0 then return end
     if not OM.players[target] then return end -- only track damage taken by our group
 
     source = NormalizeName(source) or "Unknown"
+    spell = spell or "Auto Attack"
+    hitType = hitType or "hit"
     NoteLastHit(target, source, spell, amount)
 
-    local p = EnsurePlayer(OM.data.current, target)
-    if p then
-        p.damageTaken = p.damageTaken + amount
+    local function apply(seg)
+        if not seg then return end
+        local p = EnsurePlayer(seg, target)
+        if not p then return end
+        p.damageTaken = (p.damageTaken or 0) + amount
+        if not p.damageTakenBy then p.damageTakenBy = {} end
         p.damageTakenBy[source] = (p.damageTakenBy[source] or 0) + amount
+        -- byTarget on taken details = attacker name
+        NoteSpellOutcome(p, spell, amount, hitType, false, source, partialFlag, true)
     end
+    apply(OM.data and OM.data.current)
+    apply(OM.data and OM.data.overall)
+end
 
-    local o = EnsurePlayer(OM.data.overall, target)
-    if o then
-        o.damageTaken = o.damageTaken + amount
-        o.damageTakenBy[source] = (o.damageTakenBy[source] or 0) + amount
+-- Incoming avoid (enemy missed / we dodged-parried-blocked): no damage amount
+function Parser:AddTakenAvoid(target, spell, source, avoidType)
+    if not ModeEnabled("taken") then return end
+    target = NormalizeName(target)
+    if not target or not OM.players[target] then return end
+    source = NormalizeName(source) or "Unknown"
+    spell = spell or "Auto Attack"
+    avoidType = avoidType or "miss"
+    local function apply(seg)
+        if not seg then return end
+        local p = EnsurePlayer(seg, target)
+        if p then
+            NoteSpellOutcome(p, spell, 0, avoidType, false, source, false, true)
+        end
     end
+    apply(OM.data and OM.data.current)
+    apply(OM.data and OM.data.overall)
 end
 
 function Parser:AddDispel(source, what, target)
@@ -1740,8 +1856,8 @@ local function HandleAuraGain(target, spell)
     if IsAbsorbShield(spell) then
         local applicator = GetRecentAbsorbCaster(spell)
         -- Prefer a recent cast aimed at this specific target when available
-        if recentShieldByTarget and recentShieldByTarget[target] then
-            local entry = recentShieldByTarget[target]
+        if ST.recentShieldByTarget and ST.recentShieldByTarget[target] then
+            local entry = ST.recentShieldByTarget[target]
             if entry and entry.caster and (GetTime() - (entry.time or 0)) <= RECENT_CASTER_TIMEOUT then
                 applicator = entry.caster
             end
@@ -1936,8 +2052,8 @@ local pendingDispelCasts = {} -- { { caster, target, time, spell }, ... }
 local lastDispelCastKey = nil -- "caster|spell" for de-dupe
 local lastDispelCastTime = 0
 local directDispelSuppressUntil = 0 -- ignore fade pairing briefly after a direct remove
--- recentHarmfulAuras[targetName][spellName] = lastApplyTime
-local recentHarmfulAuras = {}
+-- ST.recentHarmfulAuras[targetName][spellName] = lastApplyTime
+ST.recentHarmfulAuras = {}
 
 -- Friendly/beneficial auras that should never be credited via cast↔fade pairing
 local FRIENDLY_AURAS = {
@@ -2017,19 +2133,19 @@ local function NoteHarmfulAura(target, spell)
     target = NormalizeName(target)
     if not target or not spell or spell == "" then return end
     if IsFriendlyAura(spell) then return end
-    if not recentHarmfulAuras[target] then
-        recentHarmfulAuras[target] = {}
+    if not ST.recentHarmfulAuras[target] then
+        ST.recentHarmfulAuras[target] = {}
     end
-    recentHarmfulAuras[target][spell] = GetTime()
+    ST.recentHarmfulAuras[target][spell] = GetTime()
 end
 
 local function ClearHarmfulAura(target, spell)
     target = NormalizeName(target)
-    if not target or not recentHarmfulAuras[target] then return end
+    if not target or not ST.recentHarmfulAuras[target] then return end
     if spell then
-        recentHarmfulAuras[target][spell] = nil
+        ST.recentHarmfulAuras[target][spell] = nil
     else
-        recentHarmfulAuras[target] = nil
+        ST.recentHarmfulAuras[target] = nil
     end
 end
 
@@ -2038,7 +2154,7 @@ local function IsTrackedHarmfulAura(target, spell)
     target = NormalizeName(target)
     if not target or not spell or spell == "" then return false end
     if IsFriendlyAura(spell) then return false end
-    local byTarget = recentHarmfulAuras[target]
+    local byTarget = ST.recentHarmfulAuras[target]
     if not byTarget then return false end
     local t = byTarget[spell]
     if not t then
@@ -2062,7 +2178,7 @@ end
 local function PruneHarmfulAuras(now)
     now = now or GetTime()
     local target, spells
-    for target, spells in pairs(recentHarmfulAuras) do
+    for target, spells in pairs(ST.recentHarmfulAuras) do
         local spell, t
         local empty = true
         for spell, t in pairs(spells) do
@@ -2073,7 +2189,7 @@ local function PruneHarmfulAuras(now)
             end
         end
         if empty then
-            recentHarmfulAuras[target] = nil
+            ST.recentHarmfulAuras[target] = nil
         end
     end
 end
@@ -2776,7 +2892,7 @@ end
 -- De-dupe absorb credits: the same absorb often arrives twice
 -- (hit line "(N absorbed)" trailer + standalone "X absorbs N damage",
 -- or RAW_COMBATLOG + CHAT_MSG). Collapse duplicates within a short window.
-local recentAbsorbCredits = {} -- [ "unit|amount" ] = GetTime()
+ST.recentAbsorbCredits = {} -- [ "unit|amount" ] = GetTime()
 local ABSORB_DEDUPE_WINDOW = 0.2
 
 local function CreditAbsorb(buffedUnit, amount, shieldName)
@@ -2786,17 +2902,17 @@ local function CreditAbsorb(buffedUnit, amount, shieldName)
 
     local now = GetTime()
     local dedupeKey = tostring(buffedUnit) .. "|" .. tostring(amount)
-    local last = recentAbsorbCredits[dedupeKey]
+    local last = ST.recentAbsorbCredits[dedupeKey]
     if last and (now - last) < ABSORB_DEDUPE_WINDOW then
         return
     end
-    recentAbsorbCredits[dedupeKey] = now
+    ST.recentAbsorbCredits[dedupeKey] = now
     -- Occasional prune
     if math.mod(math.floor(now * 5), 25) == 0 then
         local k, ts
-        for k, ts in pairs(recentAbsorbCredits) do
+        for k, ts in pairs(ST.recentAbsorbCredits) do
             if (now - ts) > 1 then
-                recentAbsorbCredits[k] = nil
+                ST.recentAbsorbCredits[k] = nil
             end
         end
     end
@@ -2804,8 +2920,8 @@ local function CreditAbsorb(buffedUnit, amount, shieldName)
     local applicator, spell = GetAbsorbApplicator(buffedUnit)
 
     -- Prefer recent cast aimed at this unit (name + caster)
-    if recentShieldByTarget and recentShieldByTarget[buffedUnit] then
-        local entry = recentShieldByTarget[buffedUnit]
+    if ST.recentShieldByTarget and ST.recentShieldByTarget[buffedUnit] then
+        local entry = ST.recentShieldByTarget[buffedUnit]
         if entry and (GetTime() - (entry.time or 0)) <= RECENT_CASTER_TIMEOUT then
             if entry.caster and not applicator then
                 applicator = entry.caster
@@ -2821,16 +2937,16 @@ local function CreditAbsorb(buffedUnit, amount, shieldName)
     if not label or label == "" or label == "Absorb" then
         label = spell
     end
-    if (not label or label == "" or label == "Absorb") and absorbAuras[buffedUnit] then
+    if (not label or label == "" or label == "Absorb") and ST.absorbAuras[buffedUnit] then
         -- Prefer Power Word: Shield when present, else any active shield on the unit
-        if absorbAuras[buffedUnit]["Power Word: Shield"] then
+        if ST.absorbAuras[buffedUnit]["Power Word: Shield"] then
             label = "Power Word: Shield"
             if not applicator then
-                applicator = absorbAuras[buffedUnit]["Power Word: Shield"]
+                applicator = ST.absorbAuras[buffedUnit]["Power Word: Shield"]
             end
         else
             local s, app
-            for s, app in pairs(absorbAuras[buffedUnit]) do
+            for s, app in pairs(ST.absorbAuras[buffedUnit]) do
                 label = s
                 if not applicator then applicator = app end
                 break
@@ -2903,6 +3019,24 @@ local function ExtractAbsorbTrailer(message)
     end
 
     return message, absorbAmount
+end
+
+local function ExtractBlockTrailer(message)
+    if not message then return message, nil end
+    local amt
+    local _, _, a = string.find(message, "%((%d+) blocked%)")
+    if a then
+        amt = tonumber(a)
+        message = string.gsub(message, "%s*%(%d+ blocked%)", "")
+        return message, amt
+    end
+    _, _, a = string.find(message, "%((%d+) Blocked%)")
+    if a then
+        amt = tonumber(a)
+        message = string.gsub(message, "%s*%(%d+ [Bb]locked%)", "")
+        return message, amt
+    end
+    return message, nil
 end
 
 local function ExtractResistTrailer(message)
@@ -3061,7 +3195,7 @@ local function ParseEnemyDeath(message)
 
     name = NormalizeName(name)
     if OM.players[name] or name == UnitName("player") then
-        Parser:AddDeath(name, lastHitOn[name])
+        Parser:AddDeath(name, ST.lastHitOn[name])
         return true
     end
     -- Hostile / other NPC death for boss detection
@@ -3082,7 +3216,7 @@ local function ParseResistMessage(message)
     local src, spell, target
     _, _, spell, target = string.find(message, "^Your (.+) was resisted by (.+)%.?$")
     if spell and target then
-        Parser:AddResist(playerName, spell, target)
+        Parser:AddResist(H.getPlayerName(), spell, target)
         return true
     end
     _, _, src, spell, target = string.find(message, "^(.+)'s (.+) was resisted by (.+)%.?$")
@@ -3106,133 +3240,243 @@ local function ParseMissMessage(message)
 
     local src, spell, target, amt
 
+    -- Incoming avoids / enemy misses on us (damage-taken detail)
+    -- "SOURCE misses you."
+    _, _, src = string.find(message, "^(.+) misses you%.?$")
+    if src and src ~= "You" then
+        Parser:AddMiss(src, "Auto Attack", H.getPlayerName())
+        Parser:AddTakenAvoid(H.getPlayerName(), "Auto Attack", src, "miss")
+        return true
+    end
+    _, _, src = string.find(message, "^(.+) missed you%.?$")
+    if src and src ~= "You" then
+        Parser:AddMiss(src, "Auto Attack", H.getPlayerName())
+        Parser:AddTakenAvoid(H.getPlayerName(), "Auto Attack", src, "miss")
+        return true
+    end
+    -- "SOURCE's SPELL misses/missed you."
+    _, _, src, spell = string.find(message, "^(.+)'s (.+) misses you%.?$")
+    if src and spell then
+        Parser:AddMiss(src, spell, H.getPlayerName())
+        Parser:AddTakenAvoid(H.getPlayerName(), spell, src, "miss")
+        return true
+    end
+    _, _, src, spell = string.find(message, "^(.+)'s (.+) missed you%.?$")
+    if src and spell then
+        Parser:AddMiss(src, spell, H.getPlayerName())
+        Parser:AddTakenAvoid(H.getPlayerName(), spell, src, "miss")
+        return true
+    end
+    -- "SOURCE attacks. You dodge/parry/block."
+    _, _, src = string.find(message, "^(.+) attacks%. You dodge%.?$")
+    if src then
+        Parser:AddTakenAvoid(H.getPlayerName(), "Auto Attack", src, "dodge")
+        return true
+    end
+    _, _, src = string.find(message, "^(.+) attacks%. You parry%.?$")
+    if src then
+        Parser:AddTakenAvoid(H.getPlayerName(), "Auto Attack", src, "parry")
+        return true
+    end
+    _, _, src = string.find(message, "^(.+) attacks%. You block%.?$")
+    if src then
+        Parser:AddTakenAvoid(H.getPlayerName(), "Auto Attack", src, "block")
+        return true
+    end
+    -- "SOURCE's SPELL was dodged/parried/blocked." (OTHERSELF — we are the defender)
+    _, _, src, spell = string.find(message, "^(.+)'s (.+) was dodged%.?$")
+    if src and spell then
+        Parser:AddTakenAvoid(H.getPlayerName(), spell, src, "dodge")
+        return true
+    end
+    _, _, src, spell = string.find(message, "^(.+)'s (.+) was parried%.?$")
+    if src and spell then
+        Parser:AddTakenAvoid(H.getPlayerName(), spell, src, "parry")
+        return true
+    end
+    _, _, src, spell = string.find(message, "^(.+)'s (.+) was blocked%.?$")
+    if src and spell then
+        Parser:AddTakenAvoid(H.getPlayerName(), spell, src, "block")
+        return true
+    end
+
     -- "You miss TARGET."
     _, _, target = string.find(message, "^You miss (.+)%.?$")
     if target then
-        Parser:AddMiss(playerName, "Auto Attack", target)
+        Parser:AddMiss(H.getPlayerName(), "Auto Attack", target)
         return true
     end
-    -- "Your SPELL misses TARGET."
+    -- "Your SPELL misses/missed TARGET." (SPELLMISSSELFOTHER uses "missed")
     _, _, spell, target = string.find(message, "^Your (.+) misses (.+)%.?$")
     if spell and target then
-        Parser:AddMiss(playerName, spell, target)
+        Parser:AddMiss(H.getPlayerName(), spell, target)
         return true
     end
-    -- "SOURCE misses TARGET."
+    _, _, spell, target = string.find(message, "^Your (.+) missed (.+)%.?$")
+    if spell and target then
+        Parser:AddMiss(H.getPlayerName(), spell, target)
+        return true
+    end
+    -- "SOURCE misses TARGET." / MISSEDSELFOTHER style
     _, _, src, target = string.find(message, "^(.+) misses (.+)%.?$")
     if src and target and src ~= "You" then
         Parser:AddMiss(src, "Auto Attack", target)
         return true
     end
-    -- "SOURCE's SPELL misses TARGET."
+    _, _, src, target = string.find(message, "^(.+) missed (.+)%.?$")
+    if src and target and src ~= "You" then
+        -- Prefer spell form below when "X's Spell missed Y"
+        if not string.find(src, "'s ", 1, true) then
+            Parser:AddMiss(src, "Auto Attack", target)
+            return true
+        end
+    end
+    -- "SOURCE's SPELL misses/missed TARGET."
     _, _, src, spell, target = string.find(message, "^(.+)'s (.+) misses (.+)%.?$")
     if src and spell and target then
         Parser:AddMiss(src, spell, target)
         return true
     end
+    _, _, src, spell, target = string.find(message, "^(.+)'s (.+) missed (.+)%.?$")
+    if src and spell and target then
+        Parser:AddMiss(src, spell, target)
+        return true
+    end
 
-    -- Vanilla melee avoid forms:
-    -- "You attack. TARGET dodges." / parries / blocks
+    -- Outbound avoids: our attack was dodged/parried/blocked by the target
+    -- Combat log forms (English 1.12):
+    --   "You attack. TARGET dodges."
+    --   "You attack. TARGET parries."
+    --   "You attack. TARGET blocks."
+    --   "SOURCE attacks. TARGET dodges." (party)
+    --   "Your SPELL was dodged/parried/blocked by TARGET."
     _, _, target = string.find(message, "^You attack%. (.+) dodges%.?$")
     if target then
-        Parser:AddMiss(playerName, "Auto Attack", target)
+        Parser:AddMiss(H.getPlayerName(), "Auto Attack", target, "dodge")
         return true
     end
     _, _, target = string.find(message, "^You attack%. (.+) parries%.?$")
     if target then
-        Parser:AddMiss(playerName, "Auto Attack", target)
+        Parser:AddMiss(H.getPlayerName(), "Auto Attack", target, "parry")
         return true
     end
     _, _, target = string.find(message, "^You attack%. (.+) blocks%.?$")
     if target then
-        Parser:AddMiss(playerName, "Auto Attack", target)
+        Parser:AddMiss(H.getPlayerName(), "Auto Attack", target, "block")
         return true
     end
-    -- "Your attack. TARGET dodges." (client variant)
+    -- Client variant: "Your attack. TARGET ..."
     _, _, target = string.find(message, "^Your attack%. (.+) dodges%.?$")
     if target then
-        Parser:AddMiss(playerName, "Auto Attack", target)
+        Parser:AddMiss(H.getPlayerName(), "Auto Attack", target, "dodge")
         return true
     end
     _, _, target = string.find(message, "^Your attack%. (.+) parries%.?$")
     if target then
-        Parser:AddMiss(playerName, "Auto Attack", target)
+        Parser:AddMiss(H.getPlayerName(), "Auto Attack", target, "parry")
         return true
     end
     _, _, target = string.find(message, "^Your attack%. (.+) blocks%.?$")
     if target then
-        Parser:AddMiss(playerName, "Auto Attack", target)
+        Parser:AddMiss(H.getPlayerName(), "Auto Attack", target, "block")
         return true
     end
-    -- "SOURCE attacks. TARGET dodges."
+    -- Party: "SOURCE attacks. TARGET dodges/parries/blocks."
+    -- Skip when TARGET is You (inbound path handled above).
     _, _, src, target = string.find(message, "^(.+) attacks%. (.+) dodges%.?$")
-    if src and target and src ~= "You" then
-        Parser:AddMiss(src, "Auto Attack", target)
+    if src and target and target ~= "You" and target ~= "you" then
+        Parser:AddMiss(src, "Auto Attack", target, "dodge")
         return true
     end
     _, _, src, target = string.find(message, "^(.+) attacks%. (.+) parries%.?$")
-    if src and target and src ~= "You" then
-        Parser:AddMiss(src, "Auto Attack", target)
+    if src and target and target ~= "You" and target ~= "you" then
+        Parser:AddMiss(src, "Auto Attack", target, "parry")
         return true
     end
     _, _, src, target = string.find(message, "^(.+) attacks%. (.+) blocks%.?$")
-    if src and target and src ~= "You" then
-        Parser:AddMiss(src, "Auto Attack", target)
+    if src and target and target ~= "You" and target ~= "you" then
+        Parser:AddMiss(src, "Auto Attack", target, "block")
         return true
     end
-
-    -- "Your SPELL was dodged/parried/blocked by TARGET."
+    -- Spells: "Your SPELL was dodged/parried/blocked by TARGET."
     _, _, spell, target = string.find(message, "^Your (.+) was dodged by (.+)%.?$")
     if spell and target then
-        Parser:AddMiss(playerName, spell, target)
+        Parser:AddMiss(H.getPlayerName(), spell, target, "dodge")
         return true
     end
     _, _, spell, target = string.find(message, "^Your (.+) was parried by (.+)%.?$")
     if spell and target then
-        Parser:AddMiss(playerName, spell, target)
+        Parser:AddMiss(H.getPlayerName(), spell, target, "parry")
         return true
     end
     _, _, spell, target = string.find(message, "^Your (.+) was blocked by (.+)%.?$")
     if spell and target then
-        Parser:AddMiss(playerName, spell, target)
+        Parser:AddMiss(H.getPlayerName(), spell, target, "block")
         return true
     end
+    -- "SOURCE's SPELL was dodged/parried/blocked by TARGET."
     _, _, src, spell, target = string.find(message, "^(.+)'s (.+) was dodged by (.+)%.?$")
     if src and spell and target then
-        Parser:AddMiss(src, spell, target)
+        Parser:AddMiss(src, spell, target, "dodge")
         return true
     end
     _, _, src, spell, target = string.find(message, "^(.+)'s (.+) was parried by (.+)%.?$")
     if src and spell and target then
-        Parser:AddMiss(src, spell, target)
+        Parser:AddMiss(src, spell, target, "parry")
         return true
     end
     _, _, src, spell, target = string.find(message, "^(.+)'s (.+) was blocked by (.+)%.?$")
     if src and spell and target then
-        Parser:AddMiss(src, spell, target)
+        Parser:AddMiss(src, spell, target, "block")
         return true
     end
 
-    -- Rare "You glance TARGET for N" form (most clients use hit + (glancing) trailer)
     _, _, target, amt = string.find(message, "^You glance (.+) for (%d+)")
     if target and amt then
-        Parser:AddDamage(playerName, tonumber(amt), "Auto Attack", NormalizeName(target), "glance")
+        Parser:AddDamage(H.getPlayerName(), tonumber(amt), "Auto Attack", H.NormalizeName(target), "glance")
         return true
     end
     _, _, src, target, amt = string.find(message, "^(.+) glances (.+) for (%d+)")
     if src and target and amt and src ~= "You" then
-        Parser:AddDamage(src, tonumber(amt), "Auto Attack", NormalizeName(target), "glance")
+        Parser:AddDamage(src, tonumber(amt), "Auto Attack", H.NormalizeName(target), "glance")
         return true
     end
     return false
 end
+
+-- Bind helpers into H so ParseMessage only needs H/OM/Parser upvalues
+H.NormalizeName = NormalizeName
+H.ResolveSource = ResolveSource
+H.NoteEnemyHit = NoteEnemyHit
+H.CreditAbsorb = CreditAbsorb
+H.ExtractAbsorbTrailer = ExtractAbsorbTrailer
+H.ExtractBlockTrailer = ExtractBlockTrailer
+H.ExtractResistTrailer = ExtractResistTrailer
+H.ParseAbsorbMessage = ParseAbsorbMessage
+H.ParseAuraMessage = ParseAuraMessage
+H.ParseEnemyDeath = ParseEnemyDeath
+H.ParseHardCC = ParseHardCC
+H.ParseInterruptOrDispel = ParseInterruptOrDispel
+H.ParseMissMessage = ParseMissMessage
+H.ParsePeriodicHealMessage = ParsePeriodicHealMessage
+H.ParseReflectMessage = ParseReflectMessage
+H.ParseResistMessage = ParseResistMessage
+H.ParseShieldCastMessage = ParseShieldCastMessage
+H.sanitize = sanitize
+H.combatlog_events = combatlog_events
+H.combatlog_parser = combatlog_parser
+H.defaults = defaults
+H.FALLBACK_COMBAT_PATTERNS = FALLBACK_COMBAT_PATTERNS
+H.OM = OM
+H.Parser = Parser
+H.getPlayerName = function() return ST.playerName or UnitName("player") end
 
 local function ParseMessage(event, message)
     if not message or message == "" then return end
 
     -- Full resists (before miss path)
     if string.find(message, "resist", 1, true) or string.find(message, "Resist", 1, true) then
-        if ParseResistMessage(message) then
+        if H.ParseResistMessage(message) then
             return
         end
     end
@@ -3247,7 +3491,7 @@ local function ParseMessage(event, message)
     or string.find(message, "block", 1, true)
     or string.find(message, "glance", 1, true)
     or string.find(message, "Glance", 1, true) then
-        if ParseMissMessage(message) then
+        if H.ParseMissMessage(message) then
             return
         end
     end
@@ -3258,7 +3502,7 @@ local function ParseMessage(event, message)
     or string.find(message, " dies", 1, true)
     or string.find(message, "You die", 1, true)
     or string.find(message, "you die", 1, true) then
-        if ParseEnemyDeath(message) then
+        if H.ParseEnemyDeath(message) then
             return
         end
     end
@@ -3280,7 +3524,7 @@ local function ParseMessage(event, message)
     or string.find(message, "Abolish", 1, true)
     or string.find(message, "Devour", 1, true)
     or string.find(message, "Remove Curse", 1, true) then
-        if ParseInterruptOrDispel(event, message) then
+        if H.ParseInterruptOrDispel(event, message) then
             return
         end
     end
@@ -3289,7 +3533,7 @@ local function ParseMessage(event, message)
     if string.find(message, "afflicted by", 1, true)
     or string.find(message, "fades from", 1, true)
     or string.find(message, "is afflicted", 1, true) then
-        if ParseHardCC(event, message) then
+        if H.ParseHardCC(event, message) then
             return
         end
     end
@@ -3297,7 +3541,7 @@ local function ParseMessage(event, message)
     -- HoT ticks: always credit the caster named in "from X's Spell"
     if string.find(message, "health from", 1, true)
     or string.find(message, "hit points from", 1, true) then
-        if ParsePeriodicHealMessage(message) then
+        if H.ParsePeriodicHealMessage(message) then
             return
         end
     end
@@ -3310,7 +3554,7 @@ local function ParseMessage(event, message)
         or string.find(message, "Sacrifice", 1, true)
         or string.find(message, "Ward", 1, true)
     ) then
-        if ParseShieldCastMessage(message) then
+        if H.ParseShieldCastMessage(message) then
             return
         end
     end
@@ -3329,27 +3573,27 @@ local function ParseMessage(event, message)
         local _
         _, _, spell = string.find(message, "^You perform (.+) on ")
         if spell then
-            Parser:AddThreatCast(playerName, spell)
+            H.Parser:AddThreatCast(H.getPlayerName(), spell)
         else
             _, _, spell = string.find(message, "^You cast (.+) on ")
             if spell then
-                Parser:AddThreatCast(playerName, spell)
+                H.Parser:AddThreatCast(H.getPlayerName(), spell)
             else
                 _, _, spell = string.find(message, "^You cast (.+)%.?$")
                 if spell then
-                    Parser:AddThreatCast(playerName, spell)
+                    H.Parser:AddThreatCast(H.getPlayerName(), spell)
                 else
                     _, _, src, spell = string.find(message, "^(.+) performs (.+) on ")
                     if src and spell then
-                        Parser:AddThreatCast(src, spell)
+                        H.Parser:AddThreatCast(src, spell)
                     else
                         _, _, src, spell = string.find(message, "^(.+) casts (.+) on ")
                         if src and spell then
-                            Parser:AddThreatCast(src, spell)
+                            H.Parser:AddThreatCast(src, spell)
                         else
                             _, _, src, spell = string.find(message, "^(.+) casts (.+)%.?$")
                             if src and spell then
-                                Parser:AddThreatCast(src, spell)
+                                H.Parser:AddThreatCast(src, spell)
                             end
                         end
                     end
@@ -3361,14 +3605,14 @@ local function ParseMessage(event, message)
 
     -- Plain-text reflection
     if string.find(message, "reflect", 1, true) or string.find(message, "Reflect", 1, true) then
-        if ParseReflectMessage(message) then
+        if H.ParseReflectMessage(message) then
             return
         end
     end
 
     -- Standalone absorb messages
     if string.find(message, "absorb", 1, true) or string.find(message, "Absorb", 1, true) then
-        if ParseAbsorbMessage(message) then
+        if H.ParseAbsorbMessage(message) then
             return
         end
     end
@@ -3382,47 +3626,54 @@ local function ParseMessage(event, message)
     or event == "CHAT_MSG_SPELL_SELF_BUFF"
     or event == "CHAT_MSG_SPELL_PARTY_BUFF"
     or event == "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF" then
-        ParseAuraMessage(event, message)
+        H.ParseAuraMessage(event, message)
         -- Continue: some of these events also carry heal patterns
     end
 
     -- Strip absorb / partial-resist / glancing trailers so patterns match
     local absorbFromTrailer = nil
     local resistFromTrailer = nil
+    local blockFromTrailer = nil
     local glanceFromTrailer = false
     if string.find(message, "%([Gg]lancing%)") then
         glanceFromTrailer = true
         message = string.gsub(message, "%s*%([Gg]lancing%)", "")
     end
-    message, absorbFromTrailer = ExtractAbsorbTrailer(message)
-    message, resistFromTrailer = ExtractResistTrailer(message)
+    local crushFromTrailer = false
+    if string.find(message, "%([Cc]rushing%)") then
+        crushFromTrailer = true
+        message = string.gsub(message, "%s*%([Cc]rushing%)", "")
+    end
+    message, absorbFromTrailer = H.ExtractAbsorbTrailer(message)
+    message, resistFromTrailer = H.ExtractResistTrailer(message)
+    message, blockFromTrailer = H.ExtractBlockTrailer(message)
 
-    local patterns = combatlog_events[event]
+    local patterns = H.combatlog_events[event]
     if not patterns then
         -- Unknown / SuperWoW event name: still try the full combat pattern set
-        patterns = FALLBACK_COMBAT_PATTERNS
+        patterns = H.FALLBACK_COMBAT_PATTERNS
     end
     if not patterns or table.getn(patterns) == 0 then
         if absorbFromTrailer and absorbFromTrailer > 0 then
-            local absorbTarget = playerName
+            local absorbTarget = H.getPlayerName()
             if event and string.find(event, "SELF", 1, true) then
-                absorbTarget = playerName
+                absorbTarget = H.getPlayerName()
             end
-            CreditAbsorb(absorbTarget, absorbFromTrailer, "Absorb")
+            H.CreditAbsorb(absorbTarget, absorbFromTrailer, "Absorb")
         end
         return
     end
 
     for _, pattern in ipairs(patterns) do
-        local handler = combatlog_parser[pattern]
+        local handler = H.combatlog_parser[pattern]
         if handler then
-            local regex = sanitize(pattern)
+            local regex = H.sanitize(pattern)
             if regex then
                 local found = string.find(message, regex)
                 if found then
                     local _, _, c1, c2, c3, c4, c5 = string.find(message, regex)
                     local source, spell, target, amount, school, dtype =
-                        handler(defaults, c1, c2, c3, c4, c5)
+                        handler(H.defaults, c1, c2, c3, c4, c5)
 
                     amount = tonumber(amount)
 
@@ -3434,30 +3685,40 @@ local function ParseMessage(event, message)
                         if dtype == "reflect" then
                             absTarget = target -- reflected damage absorbed by the attacker
                         elseif dtype == "reflect_taken" then
-                            absTarget = target or playerName -- we absorbed their reflection
+                            absTarget = target or H.getPlayerName() -- we absorbed their reflection
                         elseif dtype == "taken" then
-                            absTarget = target or playerName
+                            absTarget = target or H.getPlayerName()
                         elseif dtype == "damage" then
                             absTarget = target
                         end
                         if absTarget then
-                            CreditAbsorb(absTarget, absorbFromTrailer, "Absorb")
+                            H.CreditAbsorb(absTarget, absorbFromTrailer, "Absorb")
                         end
                     end
 
+                    -- Pattern globals are English format strings ("You crit %s for %d."),
+                    -- not the identifier COMBATHITCRIT*. Match case-insensitively, and
+                    -- also fall back to the live message text.
                     local hitType = "hit"
-                    if pattern and string.find(tostring(pattern), "CRIT", 1, true) then
+                    local patLower = string.lower(tostring(pattern or ""))
+                    local msgLower = string.lower(tostring(message or ""))
+                    if string.find(patLower, "crit", 1, true)
+                        or string.find(msgLower, " crits ", 1, true)
+                        or string.find(msgLower, " crit ", 1, true)
+                        or string.find(msgLower, "^you crit ", 1, true)
+                        or string.find(msgLower, " you crit ", 1, true) then
                         hitType = "crit"
-                    elseif pattern and string.find(tostring(pattern), "GLANCING", 1, true) then
+                    elseif string.find(patLower, "glancing", 1, true)
+                        or glanceFromTrailer then
                         hitType = "glance"
-                    elseif glanceFromTrailer then
-                        hitType = "glance"
+                    elseif crushFromTrailer then
+                        hitType = "crush"
                     end
 
                     if amount and amount > 0 and source then
                         if dtype == "damage" then
-                            local resolvedSource = ResolveSource(source)
-                            local tname = target and NormalizeName(target) or nil
+                            local resolvedSource = H.ResolveSource(source)
+                            local tname = target and H.NormalizeName(target) or nil
                             -- Self-inflicted (Bloodrage, Life Tap, etc.): taken only, not damage done
                             local selfHarm = false
                             if resolvedSource and tname and resolvedSource == tname then
@@ -3465,27 +3726,37 @@ local function ParseMessage(event, message)
                             end
                             if not selfHarm then
                                 local partial = (resistFromTrailer and resistFromTrailer > 0) and true or false
-                                Parser:AddDamage(source, amount, spell, tname, hitType, partial)
+                                -- Partial block still deals damage; count the hit and a block
+                                if blockFromTrailer and blockFromTrailer > 0 and hitType == "hit" then
+                                    -- keep as hit for damage totals; also note block
+                                    H.Parser:AddDamage(source, amount, spell, tname, hitType, partial)
+                                    H.Parser:AddBlock(source, spell or "Auto Attack", tname)
+                                else
+                                    H.Parser:AddDamage(source, amount, spell, tname, hitType, partial)
+                                end
                             end
-                            if tname and OM.players[tname] then
+                            if tname and H.OM.players[tname] then
                                 local takenFrom = selfHarm and (spell or "Self") or source
-                                Parser:AddDamageTaken(tname, amount, takenFrom)
+                                local takenSpell = selfHarm and (spell or "Self") or (spell or "Auto Attack")
+                                local partial = (resistFromTrailer and resistFromTrailer > 0) and true or false
+                                H.Parser:AddDamageTaken(tname, amount, takenFrom, takenSpell, hitType, partial)
                             elseif tname and not selfHarm then
-                                NoteEnemyHit(tname, amount)
+                                H.NoteEnemyHit(tname, amount)
                             end
                         elseif dtype == "heal" then
-                            Parser:AddHealing(source, amount, spell, false, target, hitType)
+                            H.Parser:AddHealing(source, amount, spell, false, target, hitType)
                         elseif dtype == "taken" then
-                            Parser:AddDamageTaken(target or playerName, amount, source)
+                            local partial = (resistFromTrailer and resistFromTrailer > 0) and true or false
+                            H.Parser:AddDamageTaken(target or H.getPlayerName(), amount, source, spell or "Auto Attack", hitType, partial)
                         elseif dtype == "reflect" then
                             -- Credit the unit wearing the reflection buff (no caster reassignment)
                             local spellName = spell or "Reflect"
-                            Parser:AddDamage(source, amount, spellName, target)
-                            if target and OM.players[NormalizeName(target)] then
-                                Parser:AddDamageTaken(target, amount, source)
+                            H.Parser:AddDamage(source, amount, spellName, target)
+                            if target and H.OM.players[H.NormalizeName(target)] then
+                                H.Parser:AddDamageTaken(target, amount, source, spellName, hitType, false)
                             end
                         elseif dtype == "reflect_taken" then
-                            Parser:AddDamageTaken(target or playerName, amount, source)
+                            H.Parser:AddDamageTaken(target or H.getPlayerName(), amount, source, spell or "Reflect", hitType, false)
                         end
                     end
                     return
@@ -3496,7 +3767,7 @@ local function ParseMessage(event, message)
 
     -- Pattern miss but trailer present
     if absorbFromTrailer and absorbFromTrailer > 0 then
-        CreditAbsorb(playerName, absorbFromTrailer, "Absorb")
+        H.CreditAbsorb(H.getPlayerName(), absorbFromTrailer, "Absorb")
     end
 end
 
@@ -3506,8 +3777,28 @@ end
 
 local parseFrame = CreateFrame("Frame")
 
+
+-- Full helper bind for lifecycle methods (keeps each function under 32 upvalues)
+H.EnsurePlayer = EnsurePlayer
+H.IsUniqueEnemyName = IsUniqueEnemyName
+H.UnitLooksLikeBoss = UnitLooksLikeBoss
+H.PickFightLabel = PickFightLabel
+H.PushFront = PushFront
+H.SnapshotSegment = SnapshotSegment
+H.DeepCopyPlayerData = DeepCopyPlayerData
+H.ClearDispelBuffers = ClearDispelBuffers
+H.MAX_RECENT_FIGHTS = MAX_RECENT_FIGHTS
+H.MAX_BOSS_FIGHTS = MAX_BOSS_FIGHTS
+H.NoteLastHit = NoteLastHit
+H.NoteActivity = NoteActivity
+H.ModeEnabled = ModeEnabled
+H.ST = ST
+H.OM = OM
+H.Parser = Parser
+H.getPlayerName = function() return ST.playerName or UnitName("player") end
+
 function Parser:OnLoad()
-    playerName = UnitName("player")
+    playerName = UnitName("player"); ST.playerName = playerName
 
     -- Short window de-dupe so RAW + CHAT of the same line do not double-count
     local recentLine = {}
@@ -3620,16 +3911,19 @@ function Parser:OnLoad()
 end
 
 function Parser:OnCombatStart()
-    Parser:FlushActiveCCs()
-    lastHitOn = {}
-    fightEnemies = {}
-    fightEnemyDeaths = {}
-    fightDuplicateNames = {}
-    fightIsBoss = false
-    fightBossName = nil
-    ClearDispelBuffers()
-    recentHarmfulAuras = {}
-    OM.data.current = {
+    local P = H.Parser
+    local S = H.ST
+    local O = H.OM
+    P:FlushActiveCCs()
+    S.lastHitOn = {}
+    S.fightEnemies = {}
+    S.fightEnemyDeaths = {}
+    S.fightDuplicateNames = {}
+    S.fightIsBoss = false
+    S.fightBossName = nil
+    H.ClearDispelBuffers()
+    S.recentHarmfulAuras = {}
+    O.data.current = {
         players = {},
         ccTargets = {},
         startTime = GetTime(),
@@ -3641,15 +3935,26 @@ function Parser:OnCombatStart()
 end
 
 function Parser:OnCombatEnd(duration)
-    Parser:FlushActiveCCs()
+    local P = H.Parser
+    local O = H.OM
+    local S = H.ST
+    local EnsurePlayer = H.EnsurePlayer
+    local IsUniqueEnemyName = H.IsUniqueEnemyName
+    local UnitLooksLikeBoss = H.UnitLooksLikeBoss
+    local PickFightLabel = H.PickFightLabel
+    local SnapshotSegment = H.SnapshotSegment
+    local PushFront = H.PushFront
+    local MAX_RECENT_FIGHTS = H.MAX_RECENT_FIGHTS
+    local MAX_BOSS_FIGHTS = H.MAX_BOSS_FIGHTS
+
+    P:FlushActiveCCs()
 
     local now = GetTime()
-    OM.data.current.endTime = now
-    local startT = OM.data.current.startTime or 0
+    O.data.current.endTime = now
+    local startT = O.data.current.startTime or 0
     duration = duration or ((startT > 0) and (now - startT) or 0)
 
-    -- Trim trailing idle time after the last damage/heal/action
-    local lastAct = OM.data.current.lastActivityTime
+    local lastAct = O.data.current.lastActivityTime
     if startT > 0 and lastAct and lastAct >= startT and lastAct < now then
         local trimmed = lastAct - startT
         if trimmed > 0 and trimmed < duration then
@@ -3657,13 +3962,12 @@ function Parser:OnCombatEnd(duration)
         end
     end
     if duration < 0 then duration = 0 end
-    OM.data.current.duration = duration
+    O.data.current.duration = duration
 
-    -- Update overall average DPS/HPS from this segment
-    if duration > 0 and OM.data.current.players then
+    if duration > 0 and O.data.current.players then
         local name, pdata
-        for name, pdata in pairs(OM.data.current.players) do
-            local o = EnsurePlayer(OM.data.overall, name)
+        for name, pdata in pairs(O.data.current.players) do
+            local o = EnsurePlayer(O.data.overall, name)
             if o then
                 local dmg = pdata.damage or 0
                 local heal = pdata.healing or 0
@@ -3677,72 +3981,68 @@ function Parser:OnCombatEnd(duration)
                 end
             end
         end
-        -- Track total active combat time for overall (sum of trimmed fights)
-        OM.data.overall.duration = (OM.data.overall.duration or 0) + duration
-        if not OM.data.overall.startTime or OM.data.overall.startTime == 0 then
-            OM.data.overall.startTime = startT
+        O.data.overall.duration = (O.data.overall.duration or 0) + duration
+        if not O.data.overall.startTime or O.data.overall.startTime == 0 then
+            O.data.overall.startTime = startT
         end
-        OM.data.overall.endTime = now
+        O.data.overall.endTime = now
     end
 
-    -- Final boss check on current target (must still be a unique name)
     if UnitExists("target") and UnitLooksLikeBoss("target") then
         local tname = UnitName("target")
         if tname and IsUniqueEnemyName(tname) then
-            fightIsBoss = true
-            fightBossName = tname
+            S.fightIsBoss = true
+            S.fightBossName = tname
         end
     end
 
-    -- If the flagged boss name was later revealed as a duplicate pack, clear it
-    if fightBossName and not IsUniqueEnemyName(fightBossName) then
-        fightIsBoss = false
-        fightBossName = nil
+    if S.fightBossName and not IsUniqueEnemyName(S.fightBossName) then
+        S.fightIsBoss = false
+        S.fightBossName = nil
     end
 
     local label = PickFightLabel()
-    OM.data.current.label = label
-    OM.data.current.isBoss = fightIsBoss and true or false
+    O.data.current.label = label
+    O.data.current.isBoss = S.fightIsBoss and true or false
 
-    -- Only store fights that had some activity
     local hasData = false
-    for _, _ in pairs(OM.data.current.players) do
+    for _, _ in pairs(O.data.current.players) do
         hasData = true
         break
     end
 
     if hasData and duration >= 1 then
-        local snap = SnapshotSegment(OM.data.current)
-
-        -- Always keep last 2 fights (trash or boss)
-        PushFront(OM.data.recentFights, snap, MAX_RECENT_FIGHTS)
-
-        -- Additionally keep last 3 boss fights
+        local snap = SnapshotSegment(O.data.current)
+        PushFront(O.data.recentFights, snap, MAX_RECENT_FIGHTS)
         if snap.isBoss then
-            PushFront(OM.data.bossFights, snap, MAX_BOSS_FIGHTS)
+            PushFront(O.data.bossFights, snap, MAX_BOSS_FIGHTS)
         end
     end
 end
 
 function Parser:OnReset()
-    Parser:FlushActiveCCs()
-    lastHitOn = {}
-    ClearDispelBuffers()
-    OM.data.current = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Current", isBoss = false, duration = 0 }
-    OM.data.overall = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Overall", isBoss = false, duration = 0 }
-    OM.data.recentFights = {}
-    OM.data.bossFights = {}
-    OM.data.paused = nil
-    OM.meterPaused = false
-    fightEnemies = {}
-    fightEnemyDeaths = {}
-    fightDuplicateNames = {}
-    fightIsBoss = false
-    fightBossName = nil
-    recentAbsorbCaster = {}
-    recentShieldByTarget = {}
-    recentAbsorbCredits = {}
-    absorbAuras = {}
+    local P = H.Parser or Parser
+    local O = H.OM or OM
+    local S = H.ST or ST
+    if not S then S = {} ; H.ST = S end
+    if P and P.FlushActiveCCs then P:FlushActiveCCs() end
+    S.lastHitOn = {}
+    if H.ClearDispelBuffers then H.ClearDispelBuffers() end
+    O.data.current = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Current", isBoss = false, duration = 0 }
+    O.data.overall = { players = {}, ccTargets = {}, startTime = 0, endTime = 0, label = "Overall", isBoss = false, duration = 0 }
+    O.data.recentFights = {}
+    O.data.bossFights = {}
+    O.data.paused = nil
+    O.meterPaused = false
+    S.fightEnemies = {}
+    S.fightEnemyDeaths = {}
+    S.fightDuplicateNames = {}
+    S.fightIsBoss = false
+    S.fightBossName = nil
+    S.recentAbsorbCaster = {}
+    S.recentShieldByTarget = {}
+    S.recentAbsorbCredits = {}
+    S.absorbAuras = {}
 end
 
 -- Resolve a UI segment key to a data table
@@ -3796,7 +4096,7 @@ function Parser:GetSegment(key)
 end
 
 function Parser:OnRosterUpdate()
-    playerName = UnitName("player")
+    playerName = UnitName("player"); ST.playerName = playerName
 end
 
 -- ============================================================
