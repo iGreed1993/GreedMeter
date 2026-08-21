@@ -394,7 +394,7 @@ function OM:TogglePause()
         self.meterPaused = false
         if UI and UI.frames then
             local _, f
-            for _, f in ipairs(UI.frames) do
+            for _gi = 1, table.getn(UI.frames) do local f = UI.frames[_gi]
                 if f.segment == "paused" then
                     f.segment = f._segmentBeforePause or "current"
                 end
@@ -418,7 +418,7 @@ function OM:TogglePause()
     self.meterPaused = true
     if UI and UI.frames then
         local _, f
-        for _, f in ipairs(UI.frames) do
+        for _gi = 1, table.getn(UI.frames) do local f = UI.frames[_gi]
             f._segmentBeforePause = f.segment or "current"
             f.segment = "paused"
         end

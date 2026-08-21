@@ -341,14 +341,14 @@ function UI:GetSegmentList()
         table.insert(list, { key = "paused", label = "Paused" })
     end
     if OM.data and OM.data.recentFights then
-        for i, fight in ipairs(OM.data.recentFights) do
+        for i = 1, table.getn(OM.data.recentFights) do local fight = OM.data.recentFights[i]
             local name = fight.label or ("Fight "..i)
             local tag = fight.isBoss and " (Boss)" or ""
             table.insert(list, { key = "recent"..i, label = name .. tag })
         end
     end
     if OM.data and OM.data.bossFights then
-        for i, fight in ipairs(OM.data.bossFights) do
+        for i = 1, table.getn(OM.data.bossFights) do local fight = OM.data.bossFights[i]
             local name = fight.label or ("Boss "..i)
             table.insert(list, { key = "boss"..i, label = "Boss: " .. name })
         end
@@ -372,7 +372,7 @@ end
 -- Full label for dropdown menus (includes fight name)
 function UI:SegmentMenuLabel(key)
     local list = self:GetSegmentList()
-    for _, entry in ipairs(list) do
+    for _gi = 1, table.getn(list) do local entry = list[_gi]
         if entry.key == key then return entry.label end
     end
     return self:SegmentLabel(key)
@@ -568,7 +568,7 @@ local function AbbreviateName(name)
     if not name or name == "" then return name end
     local words = {}
     -- Lua 5.0: string.gfind (gmatch is 5.1+)
-    local gfind = string.gfind or string.gmatch
+    local gfind = string.gfind
     if gfind then
         for w in gfind(name, "%S+") do
             table.insert(words, w)
@@ -864,11 +864,11 @@ local function ShowDropdown(anchor, options, onSelect, openUpward, maxRows, colW
     dd:SetFrameLevel(1000)
 
     local i, btn
-    for i, btn in ipairs(dd.buttons) do
+    for i = 1, table.getn(dd.buttons) do local btn = dd.buttons[i]
         btn:Hide()
     end
 
-    for i, opt in ipairs(options) do
+    for i = 1, table.getn(options) do local opt = options[i]
         btn = dd.buttons[i]
         if not btn then
             btn = CreateFrame("Button", nil, dd)
@@ -965,7 +965,7 @@ local function ShowBarTooltip(bar)
             if table.getn(targets) > 0 then
                 GameTooltip:AddLine("By target:", 1, 0.82, 0)
                 local shown = 0
-                for _, t in ipairs(targets) do
+                for _gi = 1, table.getn(targets) do local t = targets[_gi]
                     shown = shown + 1
                     if shown > 3 then break end
                     GameTooltip:AddDoubleLine(t.name, FormatNumber(t.amt), 0.8, 0.8, 0.8, 1, 1, 1)
@@ -983,7 +983,7 @@ local function ShowBarTooltip(bar)
                 GameTooltip:AddLine("By spell:", 1, 0.82, 0)
             end
             local shown = 0
-            for _, s in ipairs(spells) do
+            for _gi = 1, table.getn(spells) do local s = spells[_gi]
                 shown = shown + 1
                 if shown > 8 then break end
                 local right = FormatNumber(s.amt)
@@ -1021,7 +1021,7 @@ local function ShowBarTooltip(bar)
             if table.getn(targets) > 0 then
                 GameTooltip:AddLine("Healed:", 1, 0.82, 0)
                 local shown = 0
-                for _, t in ipairs(targets) do
+                for _gi = 1, table.getn(targets) do local t = targets[_gi]
                     shown = shown + 1
                     if shown > 3 then break end
                     GameTooltip:AddDoubleLine(t.name, FormatNumber(t.amt), 0.8, 0.8, 0.8, 1, 1, 1)
@@ -1039,7 +1039,7 @@ local function ShowBarTooltip(bar)
                 GameTooltip:AddLine("By spell:", 1, 0.82, 0)
             end
             local shown = 0
-            for _, s in ipairs(spells) do
+            for _gi = 1, table.getn(spells) do local s = spells[_gi]
                 shown = shown + 1
                 if shown > 8 then break end
                 local right = FormatNumber(s.amt)
@@ -1058,7 +1058,7 @@ local function ShowBarTooltip(bar)
             end
             table.sort(srcs, function(a, b) return a.amt > b.amt end)
             local shown = 0
-            for _, s in ipairs(srcs) do
+            for _gi = 1, table.getn(srcs) do local s = srcs[_gi]
                 shown = shown + 1
                 if shown > 10 then break end
                 GameTooltip:AddDoubleLine(s.src, FormatNumber(s.amt), 0.8, 0.8, 0.8, 1, 1, 1)
@@ -1074,7 +1074,7 @@ local function ShowBarTooltip(bar)
         -- Spell names removed (and counts)
         local counts = {}
         local _, what
-        for _, what in ipairs(list) do
+        for _gi = 1, table.getn(list) do local what = list[_gi]
             counts[what] = (counts[what] or 0) + 1
         end
         local ordered = {}
@@ -1086,7 +1086,7 @@ local function ShowBarTooltip(bar)
             return a.name < b.name
         end)
         local shown = 0
-        for _, entry in ipairs(ordered) do
+        for _gi = 1, table.getn(ordered) do local entry = ordered[_gi]
             shown = shown + 1
             if shown > 12 then break end
             GameTooltip:AddDoubleLine(entry.name, tostring(entry.n), 0.8, 0.8, 0.8, 1, 1, 1)
@@ -1100,7 +1100,7 @@ local function ShowBarTooltip(bar)
         GameTooltip:AddLine("Interrupts: " .. c, 1, 1, 1)
         local counts = {}
         local _, what
-        for _, what in ipairs(list) do
+        for _gi = 1, table.getn(list) do local what = list[_gi]
             counts[what] = (counts[what] or 0) + 1
         end
         for what, n in pairs(counts) do
@@ -1115,7 +1115,7 @@ local function ShowBarTooltip(bar)
         GameTooltip:AddLine("Est. duration: " .. string.format("%.1fs", d), 0.8, 0.8, 0.8)
         local spellCounts = {}
         local _, entry
-        for _, entry in ipairs(list) do
+        for _gi = 1, table.getn(list) do local entry = list[_gi]
             if type(entry) == "table" then
                 local sp = entry.spell or "?"
                 if not spellCounts[sp] then
@@ -1134,7 +1134,7 @@ local function ShowBarTooltip(bar)
         GameTooltip:AddLine("CC breaks: " .. c, 1, 1, 1)
         local counts = {}
         local _, entry
-        for _, entry in ipairs(list) do
+        for _gi = 1, table.getn(list) do local entry = list[_gi]
             if type(entry) == "table" then
                 local sp = entry.spell or "?"
                 counts[sp] = (counts[sp] or 0) + 1
@@ -1150,7 +1150,7 @@ local function ShowBarTooltip(bar)
         local c = (data.deaths and data.deaths.count) or table.getn(list)
         GameTooltip:AddLine("Deaths: " .. c, 1, 1, 1)
         local _, entry
-        for _, entry in ipairs(list) do
+        for _gi = 1, table.getn(list) do local entry = list[_gi]
             if type(entry) == "table" then
                 local killer = entry.killer or "?"
                 local spell = entry.spell or "?"

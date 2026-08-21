@@ -31,6 +31,9 @@ OM.defaults = {
     frameOpacity = 100,
     confirmReset = false,
     partyReset = false, -- auto-reset on join/leave party or party→raid
+    -- Test toggles: allow forcing backends off while the client mods stay installed
+    useNampower = true,  -- when false, skip nampower structured events even if DLL present
+    useSuperWoW = true,  -- when false, skip SuperWoW RAW + GUID helpers even if present
     confirmAnnounce = false,
     accountWideLayout = false, -- when true, window size/pos/count is shared across characters
     abbreviateNames = false,
@@ -130,6 +133,31 @@ function OM:GetLayoutDB()
 end
 
 -- Detect SuperWoW via global SUPERWOW_VERSION
+
+function OM:HasNampower()
+    local NS = GreedMeter.ParserNS
+    local np = NS and NS.Backends and NS.Backends.Nampower
+    if np and np.Available then
+        return np.Available()
+    end
+    return false
+end
+
+function OM:GetCombatBackendStatusText()
+    local NS = GreedMeter.ParserNS
+    local backend = NS and NS.combatBackend or "chat"
+    if backend == "nampower" then
+        local extra = ""
+        if self:HasSuperWoW() then
+            extra = " + SuperWoW helpers"
+        end
+        return "Nampower structured events" .. extra
+    elseif backend == "superwow" then
+        return "SuperWoW RAW combat log"
+    end
+    return "Standard chat log"
+end
+
 function OM:HasSuperWoW()
     -- Explicit SuperWoW markers only (avoid false positives that break parsing)
     if SUPERWOW_VERSION or SUPERWOW_STRING then
@@ -142,15 +170,26 @@ function OM:HasSuperWoW()
 end
 
 function OM:GetSuperWoWStatusText()
-    if not self:HasSuperWoW() then
-        return "Standard (install SuperWoW for better accuracy)"
+    local hasNP = self.HasNampower and self:HasNampower()
+    local hasSW = self.HasSuperWoW and self:HasSuperWoW()
+    if hasNP and hasSW then
+        local ver = tostring(SUPERWOW_VERSION or SUPERWOW_STRING or "detected")
+        return "Nampower + SuperWoW active (" .. ver .. ")"
     end
-    local ver = tostring(SUPERWOW_VERSION or SUPERWOW_STRING or "detected")
-    return "SuperWoW active (" .. ver .. ")"
+    if hasNP then
+        return "Nampower active (SuperWoW not detected)"
+    end
+    if hasSW then
+        local ver = tostring(SUPERWOW_VERSION or SUPERWOW_STRING or "detected")
+        return "SuperWoW active (" .. ver .. ") — Nampower not detected"
+    end
+    return "GreedMeter works best with Nampower and SuperWoW"
 end
 
 function OM:ShowSuperWoWPromptIfNeeded()
-    if self:HasSuperWoW() then
+    local hasNP = self.HasNampower and self:HasNampower()
+    local hasSW = self.HasSuperWoW and self:HasSuperWoW()
+    if hasNP and hasSW then
         return
     end
     if self:GetSetting("superwowPromptShown") then
@@ -158,13 +197,12 @@ function OM:ShowSuperWoWPromptIfNeeded()
     end
 
     StaticPopupDialogs["GREEDMETER_SUPERWOW"] = {
-        text = "GreedMeter works without SuperWoW, but runs with better accuracy and features when SuperWoW is installed.\n\nWe recommend SuperWoW for the best experience.",
+        text = "GreedMeter works best with Nampower and SuperWoW. Features that rely on them (structured combat events, pet ownership, GUID tracking, and more accurate threat) are less accurate without them.",
         button1 = "OK",
         OnAccept = function()
             OM:SetSetting("superwowPromptShown", true)
         end,
         OnShow = function()
-            -- ensure flag is set if they only press escape with hideOnEscape
         end,
         timeout = 0,
         whileDead = 1,

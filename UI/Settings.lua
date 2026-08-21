@@ -77,14 +77,14 @@ function UI:AnnounceFrame(f)
     -- Total for share % (exclude a Total row if present)
     local metricTotal = 0
     local _, entry
-    for _, entry in ipairs(list) do
+    for _gi = 1, table.getn(list) do local entry = list[_gi]
         if not entry.isTotal then
             metricTotal = metricTotal + (entry.value or 0)
         end
     end
 
     local i
-    for i, entry in ipairs(list) do
+    for i = 1, table.getn(list) do local entry = list[i]
         if i > limit then break end
         local line = i .. ". " .. entry.name .. " - " .. GetSecondaryText(entry.data, mode, duration, metricTotal)
         SendChatMessage(line, channel)
@@ -208,7 +208,9 @@ function UI:CreateSettingsFrame()
     else
         sw:SetText("")
     end
-    if OM.HasSuperWoW and OM:HasSuperWoW() then
+    local hasNP = OM.HasNampower and OM:HasNampower()
+    local hasSW = OM.HasSuperWoW and OM:HasSuperWoW()
+    if hasNP and hasSW then
         sw:SetTextColor(0.4, 1, 0.4)
     else
         sw:SetTextColor(1, 0.8, 0.3)
@@ -490,7 +492,7 @@ end
 
 function UI:OnReset()
     local _, f
-    for _, f in ipairs(self.frames) do
+    for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
         f.scrollOffset = 0
         f.maxScroll = 0
         f.hiddenNames = {}
@@ -503,7 +505,7 @@ function UI:OnReset()
         -- Clear bar state so nothing stale remains
         if f.bars then
             local i, bar
-            for i, bar in ipairs(f.bars) do
+            for i = 1, table.getn(f.bars) do local bar = f.bars[i]
                 bar:Hide()
                 bar.entry = nil
                 bar:SetValue(0)
@@ -560,7 +562,7 @@ function UI:ShowNameFilterMenu(f, anchor)
             f.hiddenNames = {}
         elseif value == "__NONE__" then
             local _, n2
-            for _, n2 in ipairs(names) do
+            for _gi = 1, table.getn(names) do local n2 = names[_gi]
                 f.hiddenNames[n2] = true
             end
         else
@@ -597,18 +599,18 @@ end
 function UI:ToggleAllFrames()
     local anyShown = false
     local _, f
-    for _, f in ipairs(self.frames) do
+    for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
         if f:IsShown() then
             anyShown = true
             break
         end
     end
     if anyShown then
-        for _, f in ipairs(self.frames) do
+        for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
             f:Hide()
         end
     else
-        for _, f in ipairs(self.frames) do
+        for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
             f:Show()
             self:RefreshFrame(f)
         end
@@ -942,7 +944,7 @@ end
 local function ApplyModeEnabledToFrames()
     if not UI.frames then return end
     local _, f
-    for _, f in ipairs(UI.frames) do
+    for _gi = 1, table.getn(UI.frames) do local f = UI.frames[_gi]
         if f.mode and UI.IsModeEnabled and not UI.IsModeEnabled(f.mode) then
             local nextMode = (UI.FirstEnabledMode and UI.FirstEnabledMode()) or "damage"
             f.mode = nextMode

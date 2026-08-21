@@ -1978,7 +1978,7 @@ end
 function Threat:AnyFrameInThreatMode()
     if not UI or not UI.frames then return false end
     local _, f
-    for _, f in ipairs(UI.frames) do
+    for _gi = 1, table.getn(UI.frames) do local f = UI.frames[_gi]
         if f:IsShown() and IsThreatModeKey(f.mode) then
             return true
         end
@@ -1989,7 +1989,7 @@ end
 function Threat:AnyFrameInTankView()
     if not UI or not UI.frames then return false end
     local _, f
-    for _, f in ipairs(UI.frames) do
+    for _gi = 1, table.getn(UI.frames) do local f = UI.frames[_gi]
         if f:IsShown() and TankViewActive(f.mode) then
             return true
         end
@@ -2221,7 +2221,7 @@ function Threat:RefreshFrame(f)
     if not tankMode and OM.GetSetting and OM:GetSetting("showTotal") and table.getn(list) > 0 then
         local totalVal = 0
         local _, entry
-        for _, entry in ipairs(list) do
+        for _gi = 1, table.getn(list) do local entry = list[_gi]
             if not entry.data or not entry.data.isPull then
                 totalVal = totalVal + (entry.value or 0)
             end
@@ -2236,7 +2236,7 @@ function Threat:RefreshFrame(f)
 
     local maxVal = 0
     local _, entry
-    for _, entry in ipairs(list) do
+    for _gi = 1, table.getn(list) do local entry = list[_gi]
         if not entry.isTotal and entry.value and entry.value > maxVal then
             maxVal = entry.value
         end
@@ -2257,7 +2257,7 @@ function Threat:RefreshFrame(f)
     local hasTotal = false
     local totalEntry = nil
     local playerList = {}
-    for _, entry in ipairs(list) do
+    for _gi = 1, table.getn(list) do local entry = list[_gi]
         if entry.isTotal then
             hasTotal = true
             totalEntry = entry
@@ -2521,7 +2521,7 @@ local function EnsureModeInList(enabled)
     if not enabled then
         if UI.frames then
             local _, f
-            for _, f in ipairs(UI.frames) do
+            for _gi = 1, table.getn(UI.frames) do local f = UI.frames[_gi]
                 if IsThreatModeKey(f.mode) then
                     f.mode = "damage"
                     if f.title then f.title:SetText(UI.MODE_LABELS.damage or "Damage") end
@@ -2566,7 +2566,7 @@ local function EnsureModeInList(enabled)
             valid.threat = true
         end
         local _, f
-        for _, f in ipairs(UI.frames) do
+        for _gi = 1, table.getn(UI.frames) do local f = UI.frames[_gi]
             if IsThreatModeKey(f.mode) and not valid[f.mode] then
                 if valid.threat then
                     f.mode = "threat"
@@ -2707,7 +2707,7 @@ local function AddThreatCheckboxToSettings(f)
             OM:SetSetting(entry.key, checked)
             if entry.onToggle then entry.onToggle(checked) end
             local c
-            for _, c in ipairs(childCbs) do
+            for _gi = 1, table.getn(childCbs) do local c = childCbs[_gi]
                 SyncChildEnabled(this, c, entry.key)
             end
             SyncDropdownEnabled()
@@ -3129,6 +3129,7 @@ end
 
 local elapsed = 0
 eventFrame:SetScript("OnUpdate", function()
+    if not OM or not OM.GetSetting then return end
     if not OM:GetSetting("enableThreatMode") then return end
     if not Threat:AnyFrameInThreatMode() then return end
 

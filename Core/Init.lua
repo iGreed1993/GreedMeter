@@ -38,7 +38,7 @@ function OM:ApplyCombatLogRange(range)
     self.combatLogRange = range
 
     local rangeStr = tostring(range)
-    for _, cvar in ipairs(COMBAT_LOG_RANGE_CVARS) do
+    for _gi = 1, table.getn(COMBAT_LOG_RANGE_CVARS) do local cvar = COMBAT_LOG_RANGE_CVARS[_gi]
         SetCVar(cvar, rangeStr)
     end
     self.combatLogRangeApplied = true

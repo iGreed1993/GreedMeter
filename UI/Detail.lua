@@ -42,13 +42,14 @@ local COLS_TAKEN = {
 }
 
 local COLS_HEAL = {
-    { key = "name",  label = "Ability", width = 140 },
-    { key = "hits",  label = "Count",   width = 40 },
-    { key = "crits", label = "Crit",    width = 36 },
-    { key = "min",   label = "Min",     width = 46 },
-    { key = "max",   label = "Max",     width = 46 },
-    { key = "avg",   label = "Avg",     width = 46 },
-    { key = "total", label = "Total",   width = 52 },
+    { key = "name",     label = "Ability",  width = 130 },
+    { key = "hits",     label = "Count",    width = 40 },
+    { key = "crits",    label = "Crit",     width = 36 },
+    { key = "min",      label = "Min",      width = 44 },
+    { key = "max",      label = "Max",      width = 44 },
+    { key = "avg",      label = "Avg",      width = 44 },
+    { key = "overheal", label = "Overheal", width = 52 },
+    { key = "total",    label = "Total",    width = 52 },
 }
 
 local TARGET_COL_W = 118
@@ -117,9 +118,14 @@ local function StatsToRow(spell, d, foldAvoidIntoMiss)
     local misses = d.misses or 0
     local dodges = d.dodges or 0
     local parries = d.parries or 0
-    -- Damage-done detail: dodge/parry count under Miss (taken keeps them separate)
+    -- Damage-done: parser already adds dodge/parry into misses. If older data
+    -- only has dodge/parry buckets, fold them here once.
     if foldAvoidIntoMiss then
-        misses = misses + dodges + parries
+        local subtype = (dodges or 0) + (parries or 0)
+        if subtype > 0 and (misses or 0) < subtype then
+            misses = (misses or 0) + subtype
+        end
+        -- When storage already wrapped, misses >= subtype; leave misses as-is
         dodges = 0
         parries = 0
     end
@@ -138,6 +144,7 @@ local function StatsToRow(spell, d, foldAvoidIntoMiss)
         min = d.min or 0,
         max = d.max or 0,
         avg = avg,
+        overheal = d.overheal or 0,
         total = d.total or 0,
     }
 end

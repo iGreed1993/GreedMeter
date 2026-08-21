@@ -142,7 +142,7 @@ function UI:SaveAllFrameLayouts()
     if not layoutDB then return end
     layoutDB.frames = {}
     local i, f
-    for i, f in ipairs(self.frames) do
+    for i = 1, table.getn(self.frames) do local f = self.frames[i]
         if f and f:GetLeft() then
             -- Sanitize before persist (resolution changes, partial off-screen, etc.)
             ClampFrameToScreen(f)
@@ -189,7 +189,7 @@ end
 function UI:ResetFramePositions()
     local i, f
     if self.frames then
-        for i, f in ipairs(self.frames) do
+        for i = 1, table.getn(self.frames) do local f = self.frames[i]
             if f then
                 f:ClearAllPoints()
                 local offset = (i - 1) * 30
@@ -605,7 +605,8 @@ local f = CreateFrame("Frame", name, UIParent)
     f.segLabel = segLabel
     segBtn:SetScript("OnClick", function()
         local opts = {}
-        for _, entry in ipairs(UI:GetSegmentList()) do
+        local segList = UI:GetSegmentList()
+        for _gi = 1, table.getn(segList) do local entry = segList[_gi]
             table.insert(opts, { value = entry.key, label = entry.label })
         end
         ShowDropdown(segBtn, opts, function(value, label)
@@ -631,7 +632,7 @@ local f = CreateFrame("Frame", name, UIParent)
     f.modeLabel = modeLabel
     modeBtn:SetScript("OnClick", function()
         local opts = {}
-        for _, key in ipairs(MODE_ORDER) do
+        for _gi = 1, table.getn(MODE_ORDER) do local key = MODE_ORDER[_gi]
             -- Hide modes the user disabled in Advanced Customization
             if UI.IsModeEnabled and not UI.IsModeEnabled(key) then
                 -- skip
@@ -1138,7 +1139,7 @@ function UI:RefreshFrame(f)
             damageTakenBy = {},
         }
         local _, entry
-        for _, entry in ipairs(list) do
+        for _gi = 1, table.getn(list) do local entry = list[_gi]
             totalVal = totalVal + entry.value
             local d = entry.data
             totalData.damage = totalData.damage + (d.damage or 0)
@@ -1162,7 +1163,7 @@ function UI:RefreshFrame(f)
     if table.getn(list) > 0 then
         -- max among non-total for bar scaling
         local _, entry
-        for _, entry in ipairs(list) do
+        for _gi = 1, table.getn(list) do local entry = list[_gi]
             if not entry.isTotal and entry.value > maxVal then
                 maxVal = entry.value
             end
@@ -1197,7 +1198,7 @@ function UI:RefreshFrame(f)
     local totalEntry = nil
     local playerList = {}
     local _, e
-    for _, e in ipairs(list) do
+    for _gi = 1, table.getn(list) do local e = list[_gi]
         if e.isTotal then
             hasTotal = true
             totalEntry = e
@@ -1383,7 +1384,7 @@ end
 
 function UI:ApplySettingsToFrames()
     local _, f
-    for _, f in ipairs(self.frames) do
+    for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
         ApplyFrameBackgroundOpacity(f)
         if f:IsShown() then
             self:RefreshFrame(f)
@@ -1396,7 +1397,7 @@ function UI:ApplySettingsToFrames()
 end
 
 function UI:Refresh()
-    for _, f in ipairs(self.frames) do
+    for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
         if f:IsShown() then
             self:RefreshFrame(f)
         end
@@ -1416,10 +1417,10 @@ function UI:AddFrame(sourceFrame)
     local f = self:CreateMeterFrame(false, copyFrom)
     -- Default new frames to a different mode if possible
     local used = {}
-    for _, fr in ipairs(self.frames) do
+    for _gi = 1, table.getn(self.frames) do local fr = self.frames[_gi]
         used[fr.mode] = true
     end
-    for _, key in ipairs(MODE_ORDER) do
+    for _gi = 1, table.getn(MODE_ORDER) do local key = MODE_ORDER[_gi]
         if not used[key] and (not UI.IsModeEnabled or UI.IsModeEnabled(key)) then
             f.mode = key
             break
@@ -1443,7 +1444,7 @@ function UI:RemoveFrame(f)
     CloseDropdown()
     f:Hide()
     local newList = {}
-    for _, fr in ipairs(self.frames) do
+    for _gi = 1, table.getn(self.frames) do local fr = self.frames[_gi]
         if fr ~= f then
             table.insert(newList, fr)
         end
