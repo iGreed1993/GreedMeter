@@ -71,6 +71,20 @@ function OM:StopCombat()
     self:Fire("OnCombatEnd", duration)
 end
 
+-- Segment ends after this many seconds with no damage/heal/etc activity.
+-- Vanilla REGEN_ENABLED can lag 10–20s with pets/DoTs; the meter should not wait that long.
+OM.COMBAT_IDLE_END = 4.0
+
+function OM:CheckCombatIdleEnd()
+    if not self.inCombat then return end
+    local cur = self.data and self.data.current
+    local last = cur and cur.lastActivityTime
+    if not last then return end
+    if (GetTime() - last) >= (self.COMBAT_IDLE_END or 4.0) then
+        self:StopCombat()
+    end
+end
+
 -- Single reset entry point used by /gdm reset and the UI reset button.
 -- Parser:OnReset (fired first) owns clearing combat data; other modules
 -- clear their own state. Avoids the previous double-clear in Commands/Frames.
@@ -192,6 +206,17 @@ frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
 frame:RegisterEvent("UNIT_PET")
 frame:RegisterEvent("PET_BAR_UPDATE") -- extra pet signal
+
+-- Soft-end segment after idle (does not wait for slow REGEN_ENABLED)
+local idleElapsed = 0
+frame:SetScript("OnUpdate", function()
+    idleElapsed = idleElapsed + arg1
+    if idleElapsed < 0.25 then return end
+    idleElapsed = 0
+    if OM.CheckCombatIdleEnd then
+        OM:CheckCombatIdleEnd()
+    end
+end)
 
 frame:SetScript("OnEvent", function()
     local event = event

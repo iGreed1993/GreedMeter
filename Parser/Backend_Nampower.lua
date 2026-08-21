@@ -242,6 +242,8 @@ local function OnSpellDamage(isSelf)
     local targetGuid, casterGuid = arg1, arg2
     local spellId, amount = arg3, tonumber(arg4) or 0
     local mitigation, hitInfo = arg5, tonumber(arg6) or 0
+    -- arg7 = spellSchool, arg8 = effectAuraStr "effect1,effect2,effect3,auraType"
+    local effectAuraStr = arg8
 
     local src = NameFromGuid(casterGuid)
     if isSelf and not src then src = UnitName("player") end
@@ -261,20 +263,42 @@ local function OnSpellDamage(isSelf)
         end
     end
 
+    -- Periodic damage must not extend the segment idle timer (lingering DoTs)
+    local isPeriodic = false
+    if effectAuraStr and type(effectAuraStr) == "string" then
+        local _, _, e1, e2, e3, aura = string.find(effectAuraStr, "(%d+),(%d+),(%d+),(%d+)")
+        aura = tonumber(aura)
+        -- SPELL_AURA_PERIODIC_DAMAGE=3, PERIODIC_LEECH=53, PERIODIC_DAMAGE_PERCENT=89
+        if aura == 3 or aura == 53 or aura == 89 then
+            isPeriodic = true
+        end
+        -- Also treat non-zero effect codes that are pure DoT channels when aura missing
+        if not isPeriodic and not aura then
+            local _, _, a = string.find(effectAuraStr, "(%d+)$")
+            a = tonumber(a)
+            if a == 3 or a == 53 or a == 89 then
+                isPeriodic = true
+            end
+        end
+    end
+
     if amount > 0 then
         if IsTrackedName(src) then
-            Parser:AddDamage(src, amount, spell, tgt, hitType, partial)
+            Parser:AddDamage(src, amount, spell, tgt, hitType, partial, isPeriodic)
         end
         if IsTrackedName(tgt) then
-            Parser:AddDamageTaken(tgt, amount, src or "Unknown", spell, hitType, partial)
+            Parser:AddDamageTaken(tgt, amount, src or "Unknown", spell, hitType, partial, isPeriodic)
         end
     end
 end
 
 local function OnSpellMiss(isSelf)
-    local targetGuid, casterGuid, spellId, missType = arg1, arg2, arg3, arg4
+    -- Nampower SPELL_MISS_*: arg1=casterGuid, arg2=targetGuid, arg3=spellId, arg4=missInfo
+    -- (Documented opposite of SPELL_DAMAGE_EVENT which is target, caster.)
+    local casterGuid, targetGuid, spellId, missType = arg1, arg2, arg3, arg4
     local src = NameFromGuid(casterGuid)
     if isSelf and not src then src = UnitName("player") end
+    -- isSelf here means player is the caster (outgoing miss), not the target
     local tgt = ResolveTargetName(targetGuid, isSelf and true or false)
     if src then CachePair(casterGuid, src) end
     if tgt and targetGuid then CachePair(targetGuid, tgt) end

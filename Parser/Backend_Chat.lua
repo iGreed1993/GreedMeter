@@ -220,19 +220,19 @@ end
 -- ---------- Periodic damage ----------
 combatlog_parser[PERIODICAURADAMAGESELFOTHER] = function(d, target, value, school, spell)
     -- %s suffers %d %s damage from your %s.
-    return d.source(), spell, target, value, school, "damage"
+    return d.source(), spell, target, value, school, "periodic"
 end
 combatlog_parser[PERIODICAURADAMAGEOTHEROTHER] = function(d, target, value, school, source, spell)
     -- %s suffers %d %s damage from %s's %s.
-    return source, spell, target, value, school, "damage"
+    return source, spell, target, value, school, "periodic"
 end
 combatlog_parser[PERIODICAURADAMAGESELFSELF] = function(d, value, school, spell)
     -- You suffer %d %s damage from your %s.
-    return d.source(), spell, d.target(), value, school, "damage"
+    return d.source(), spell, d.target(), value, school, "periodic"
 end
 combatlog_parser[PERIODICAURADAMAGEOTHERSELF] = function(d, value, school, source, spell)
     -- You suffer %d %s damage from %s's %s.
-    return source, spell, d.target(), value, school, "taken"
+    return source, spell, d.target(), value, school, "periodic_taken"
 end
 
 -- ---------- Damage shields / reflection (Thorns, Retribution, etc.) ----------
@@ -1981,7 +1981,7 @@ local function ParseMissMessage(message)
     end
     _, _, src, spell = string.find(message, "^(.+)'s (.+) missed you%.?$")
     if src and spell then
-        Parser:AddMiss(src, spell, H.getPlayerName())
+        -- Incoming only — do not AddMiss for the mob (and never for us)
         Parser:AddTakenAvoid(H.getPlayerName(), spell, src, "miss")
         return true
     end
@@ -2439,7 +2439,8 @@ local function ParseMessage(event, message)
                     -- Reject false matches from mis-ordered GlobalString captures
                     -- (these produced target names like "hit", "crits", "from", "missed").
                     if (dtype == "damage" or dtype == "taken" or dtype == "heal"
-                        or dtype == "reflect" or dtype == "reflect_taken")
+                        or dtype == "reflect" or dtype == "reflect_taken"
+                        or dtype == "periodic" or dtype == "periodic_taken")
                         and (not amount or amount <= 0) then
                         -- try next pattern
                     else
@@ -2514,7 +2515,27 @@ local function ParseMessage(event, message)
                             H.Parser:AddHealing(source, amount, spell, false, target, hitType)
                         elseif dtype == "taken" then
                             local partial = (resistFromTrailer and resistFromTrailer > 0) and true or false
-                            H.Parser:AddDamageTaken(target or H.getPlayerName(), amount, source, spell or "Auto Attack", hitType, partial)
+                            H.Parser:AddDamageTaken(target or H.getPlayerName(), amount, source, spell or "Auto Attack", hitType, partial, false)
+                        elseif dtype == "periodic" then
+                            local partial = (resistFromTrailer and resistFromTrailer > 0) and true or false
+                            local tname = H.NormalizeName(target)
+                            local selfHarm = false
+                            local resolvedSource = H.ResolveSource and H.ResolveSource(source) or source
+                            if resolvedSource and tname and resolvedSource == tname then
+                                selfHarm = true
+                            end
+                            if not selfHarm then
+                                H.Parser:AddDamage(source, amount, spell, tname, hitType, partial, true)
+                            end
+                            if tname and H.OM.players[tname] then
+                                local takenFrom = selfHarm and (spell or "Self") or source
+                                H.Parser:AddDamageTaken(tname, amount, takenFrom, spell or "Auto Attack", hitType, partial, true)
+                            elseif tname and not selfHarm then
+                                H.NoteEnemyHit(tname, amount)
+                            end
+                        elseif dtype == "periodic_taken" then
+                            local partial = (resistFromTrailer and resistFromTrailer > 0) and true or false
+                            H.Parser:AddDamageTaken(target or H.getPlayerName(), amount, source, spell or "Auto Attack", hitType, partial, true)
                         elseif dtype == "reflect" then
                             -- Credit the unit wearing the reflection buff (no caster reassignment)
                             local spellName = spell or "Reflect"

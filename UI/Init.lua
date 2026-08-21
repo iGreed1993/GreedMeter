@@ -332,9 +332,10 @@ local function GetSegmentData(key)
 end
 
 function UI:GetSegmentList()
+    -- Capacity: Overall + Current + up to 3 recent + up to 5 bosses (+ optional Paused)
     local list = {
-        { key = "current", label = "Current" },
         { key = "overall", label = "Overall" },
+        { key = "current", label = "Current" },
     }
     -- Single frozen pause snapshot (never more than one)
     if OM.data and OM.data.paused then
@@ -653,7 +654,10 @@ local function GetSecondaryText(data, mode, duration, total)
             if data.dpsSamples and data.dpsSamples > 0 and data.dpsSum then
                 dps = data.dpsSum / data.dpsSamples
             elseif duration and duration > 0 then
-                dps = dmg / duration
+                -- Sub-second fights would explode DPS (250 dmg / 0.001s = 250k)
+                local d = duration
+                if d < 1 then d = 1 end
+                dps = dmg / d
             end
             if dps then
                 table.insert(parts, "(" .. FormatNumber(dps) .. ")")
@@ -675,7 +679,9 @@ local function GetSecondaryText(data, mode, duration, total)
             if data.hpsSamples and data.hpsSamples > 0 and data.hpsSum then
                 hps = data.hpsSum / data.hpsSamples
             elseif duration and duration > 0 then
-                hps = eh / duration
+                local d = duration
+                if d < 1 then d = 1 end
+                hps = eh / d
             end
             if hps then
                 table.insert(parts, "(" .. FormatNumber(hps) .. ")")

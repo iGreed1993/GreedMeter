@@ -47,6 +47,7 @@ local MAX_DEATHS_LIST = 40
 ST.fightEnemies = {}        -- [name] = damage dealt to them by group
 ST.fightEnemyDeaths = {}    -- [name] = how many times this name died this fight
 ST.fightDuplicateNames = {} -- [name] = true if name is not unique (pack trash)
+ST.fightEnemyBossLike = {}  -- [name] = true if UnitLooksLikeBoss while we hit them
 ST.fightIsBoss = false
 ST.fightBossName = nil
 
@@ -571,11 +572,11 @@ local function UnitLooksLikeBoss(unit)
             local avgLevel = GetGroupAverageLevel()
 
             -- Tanky elite relative to the group's average HP
-            if enemyHP >= avgHP * 6 then
+            if enemyHP >= avgHP * 4 then
                 return true
             end
             -- Near group level + meaningful HP pool (covers early dungeon bosses)
-            if level > 0 and level >= (avgLevel - 3) and enemyHP >= avgHP * 3 then
+            if level > 0 and level >= (avgLevel - 3) and enemyHP >= avgHP * 2.5 then
                 return true
             end
             -- Rare elites in instances are almost always notable (if unique)
@@ -599,9 +600,13 @@ local function NoteEnemyHit(enemyName, amount)
         return
     end
 
+    -- While the unit is still available, remember if it matches boss criteria
     local units = { "target", "targettarget", "pettarget", "mouseover" }
-    for _gi = 1, table.getn(units) do local u = units[_gi]
+    local ui
+    for ui = 1, table.getn(units) do
+        local u = units[ui]
         if UnitExists(u) and UnitName(u) == enemyName and UnitLooksLikeBoss(u) then
+            ST.fightEnemyBossLike[enemyName] = true
             ST.fightIsBoss = true
             ST.fightBossName = enemyName
             break
@@ -843,6 +848,64 @@ local function SnapshotSegment(seg)
     }
 end
 
+-- At segment save: any damaged enemy that looked like a boss → boss segment
+local function ResolveBossFromDamagedEnemies(seg)
+    local totals = {}
+    local name, dmg
+
+    if ST.fightEnemies then
+        for name, dmg in pairs(ST.fightEnemies) do
+            totals[name] = (totals[name] or 0) + (dmg or 0)
+        end
+    end
+    -- Also fold per-player damageTo (covers any path that skipped NoteEnemyHit)
+    if seg and seg.players then
+        local _, pdata
+        for _, pdata in pairs(seg.players) do
+            if pdata and pdata.damageTo then
+                for name, dmg in pairs(pdata.damageTo) do
+                    if name and not (OM.players and OM.players[name]) then
+                        totals[name] = (totals[name] or 0) + (dmg or 0)
+                    end
+                end
+            end
+        end
+    end
+
+    local bestName, bestDmg = nil, -1
+    local units = { "target", "targettarget", "pettarget", "mouseover" }
+    for name, dmg in pairs(totals) do
+        if IsUniqueEnemyName(name) then
+            local bossLike = ST.fightEnemyBossLike and ST.fightEnemyBossLike[name]
+            if not bossLike then
+                local ui
+                for ui = 1, table.getn(units) do
+                    local u = units[ui]
+                    if UnitExists(u) and UnitName(u) == name and UnitLooksLikeBoss(u) then
+                        bossLike = true
+                        if ST.fightEnemyBossLike then
+                            ST.fightEnemyBossLike[name] = true
+                        end
+                        break
+                    end
+                end
+            end
+            if bossLike and dmg > bestDmg then
+                bestDmg = dmg
+                bestName = name
+            end
+        end
+    end
+
+    if bestName then
+        ST.fightIsBoss = true
+        ST.fightBossName = bestName
+    else
+        ST.fightIsBoss = false
+        ST.fightBossName = nil
+    end
+end
+
 local function PickFightLabel()
     if ST.fightBossName then
         return ST.fightBossName
@@ -890,9 +953,21 @@ local function NoteLastHit(target, source, spell, amount)
 end
 
 -- Stamp last combat activity on the current segment (for trailing-idle duration trim)
+-- Begin a meter combat segment before the first event is stored (pre-REGEN hits).
+local function EnsureInCombat()
+    if OM and not OM.inCombat and OM.StartCombat then
+        OM:StartCombat()
+    end
+end
+
 local function NoteActivity()
     if OM.data and OM.data.current then
-        OM.data.current.lastActivityTime = GetTime()
+        local now = GetTime()
+        OM.data.current.lastActivityTime = now
+        local st = OM.data.current.startTime or 0
+        if st <= 0 then
+            OM.data.current.startTime = now
+        end
     end
 end
 
@@ -1035,7 +1110,8 @@ local function NoteSpellOutcome(p, spell, amount, hitType, isHeal, target, parti
     end
 end
 
-function Parser:AddDamage(source, amount, spell, target, hitType, partialFlag)
+function Parser:AddDamage(source, amount, spell, target, hitType, partialFlag, isPeriodic)
+    EnsureInCombat()
     -- Detect pet contribution before ResolveSource merges onto owner.
     -- Only mark as pet when ownership is already known from unit tokens /
     -- SuperWoW "Pet (Owner)" form — never invent a pet for random names.
@@ -1088,6 +1164,9 @@ function Parser:AddDamage(source, amount, spell, target, hitType, partialFlag)
             if target then
                 p.damageTo[target] = (p.damageTo[target] or 0) + amount
                 NoteLastHit(target, source, spell, amount)
+                if not OM.players[target] then
+                    NoteEnemyHit(target, amount)
+                end
             end
         end
 
@@ -1121,6 +1200,7 @@ end
 -- healing field stores EFFECTIVE healing (amount - overheal)
 -- overhealing tracked separately for later tooltip %
 function Parser:AddMiss(source, spell, target, avoidType)
+    EnsureInCombat()
     -- avoidType: "miss" (default), "dodge", "parry", "block"
     -- Outbound avoids (our swing/spell was avoided by the target).
     if not ModeEnabled("damage") then return end
@@ -1160,6 +1240,7 @@ function Parser:AddMiss(source, spell, target, avoidType)
 end
 
 function Parser:AddBlock(source, spell, target)
+    EnsureInCombat()
     source = ResolveSource(source)
     if not source then return end
     if not OM.players[source] and not IsTracked(source) then return end
@@ -1177,6 +1258,7 @@ function Parser:AddBlock(source, spell, target)
 end
 
 function Parser:AddResist(source, spell, target)
+    EnsureInCombat()
     source = ResolveSource(source)
     if not source then return end
     if not OM.players[source] and not IsTracked(source) then return end
@@ -1194,6 +1276,7 @@ function Parser:AddResist(source, spell, target)
 end
 
 function Parser:AddHealing(source, amount, spell, isAbsorb, target, hitType)
+    EnsureInCombat()
     if not ModeEnabled("healing") then return end
     source = ResolveSource(source)
     if not source or not amount or amount <= 0 then return end
@@ -1236,7 +1319,8 @@ function Parser:AddHealing(source, amount, spell, isAbsorb, target, hitType)
     NoteActivity()
 end
 
-function Parser:AddDamageTaken(target, amount, source, spell, hitType, partialFlag)
+function Parser:AddDamageTaken(target, amount, source, spell, hitType, partialFlag, isPeriodic)
+    EnsureInCombat()
     if not ModeEnabled("taken") then return end
     target = NormalizeName(target)
     amount = tonumber(amount) or 0
@@ -1260,10 +1344,15 @@ function Parser:AddDamageTaken(target, amount, source, spell, hitType, partialFl
     end
     apply(OM.data and OM.data.current)
     apply(OM.data and OM.data.overall)
+    -- DoT ticks still count for meters, but must not keep the segment alive
+    if not isPeriodic then
+        NoteActivity()
+    end
 end
 
 -- Incoming avoid (enemy missed / we dodged-parried-blocked): no damage amount
 function Parser:AddTakenAvoid(target, spell, source, avoidType)
+    EnsureInCombat()
     if not ModeEnabled("taken") then return end
     target = NormalizeName(target)
     if not target or not OM.players[target] then return end
@@ -1279,6 +1368,7 @@ function Parser:AddTakenAvoid(target, spell, source, avoidType)
     end
     apply(OM.data and OM.data.current)
     apply(OM.data and OM.data.overall)
+    NoteActivity()
 end
 
 function Parser:AddDispel(source, what, target)
@@ -1491,6 +1581,7 @@ H.MAX_RECENT_FIGHTS = MAX_RECENT_FIGHTS
 H.MAX_BOSS_FIGHTS = MAX_BOSS_FIGHTS
 H.NoteLastHit = NoteLastHit
 H.NoteActivity = NoteActivity
+H.EnsureInCombat = EnsureInCombat
 H.ModeEnabled = ModeEnabled
 H.ST = ST
 H.OM = OM
@@ -1499,6 +1590,7 @@ H.getPlayerName = function() return ST.playerName or UnitName("player") end
 H.NormalizeName = NormalizeName
 H.ResolveSource = ResolveSource
 H.NoteEnemyHit = NoteEnemyHit
+H.ResolveBossFromDamagedEnemies = ResolveBossFromDamagedEnemies
 
 -- ClearDispelBuffers is defined in Backend_Chat; resolve at call time
 H.ClearDispelBuffers = function()
@@ -1517,49 +1609,27 @@ function Parser:OnCombatStart()
     S.fightEnemies = {}
     S.fightEnemyDeaths = {}
     S.fightDuplicateNames = {}
+    S.fightEnemyBossLike = {}
     S.fightIsBoss = false
     S.fightBossName = nil
     H.ClearDispelBuffers()
     S.recentHarmfulAuras = {}
 
-    -- Keep damage/healing that landed in the short window before REGEN_DISABLED.
-    -- Opening auto-attacks often process before the client enters combat, so a
-    -- hard wipe of "current" would drop that first hit from the segment (while
-    -- overall still has it).
+    -- Always start Current empty. Keeping the previous players table to catch
+    -- pre-pull hits was too aggressive (late combat-log lines after REGEN_ENABLED
+    -- set lastActivityTime past endTime, so the next fight reused the old totals).
+    -- Opening-hit timing is handled by backdating startTime on the first event
+    -- after combat starts (see NoteActivity / first damage).
     local now = GetTime()
-    local prev = O.data.current
-    local keepPlayers = {}
-    local keepCC = {}
-    local keepStart = now
-    local keepLast = nil
-    local PULL_GRACE = 2.5
-    if prev and prev.lastActivityTime and (now - prev.lastActivityTime) <= PULL_GRACE then
-        local afterEnded = prev.endTime and prev.endTime > 0 and prev.lastActivityTime >= (prev.endTime - 0.05)
-        local freshSession = (not prev.endTime or prev.endTime == 0) and (
-            not prev.startTime or prev.startTime == 0 or (now - prev.startTime) <= PULL_GRACE + 0.5
-        )
-        if afterEnded or freshSession then
-            keepPlayers = prev.players or {}
-            keepCC = prev.ccTargets or {}
-            keepLast = prev.lastActivityTime
-            -- Prefer an existing recent startTime; otherwise stamp to the pre-pull activity
-            if prev.startTime and prev.startTime > 0 and (now - prev.startTime) <= PULL_GRACE + 0.5 then
-                keepStart = prev.startTime
-            else
-                keepStart = prev.lastActivityTime or now
-            end
-        end
-    end
-
     O.data.current = {
-        players = keepPlayers,
-        ccTargets = keepCC,
-        startTime = keepStart,
+        players = {},
+        ccTargets = {},
+        startTime = now,
         endTime = 0,
         label = "Current",
         isBoss = false,
         duration = 0,
-        lastActivityTime = keepLast,
+        lastActivityTime = nil,
     }
 end
 
@@ -1579,21 +1649,29 @@ function Parser:OnCombatEnd(duration)
     P:FlushActiveCCs()
 
     local now = GetTime()
-    O.data.current.endTime = now
     local startT = O.data.current.startTime or 0
     duration = duration or ((startT > 0) and (now - startT) or 0)
 
     local lastAct = O.data.current.lastActivityTime
-    if startT > 0 and lastAct and lastAct >= startT and lastAct < now then
+    if startT > 0 and lastAct and lastAct >= startT then
         local trimmed = lastAct - startT
-        if trimmed > 0 and trimmed < duration then
+        if trimmed > 0 and (duration <= 0 or trimmed < duration) then
             duration = trimmed
         end
     end
     if duration < 0 then duration = 0 end
     O.data.current.duration = duration
+    -- Freeze endTime to last activity so the UI does not keep ticking
+    if lastAct and lastAct >= startT then
+        O.data.current.endTime = lastAct
+    else
+        O.data.current.endTime = now
+    end
 
     if duration > 0 and O.data.current.players then
+        -- Never divide by sub-second durations for overall rate averages
+        local rateDur = duration
+        if rateDur < 1 then rateDur = 1 end
         local name, pdata
         for name, pdata in pairs(O.data.current.players) do
             local o = EnsurePlayer(O.data.overall, name)
@@ -1601,11 +1679,11 @@ function Parser:OnCombatEnd(duration)
                 local dmg = pdata.damage or 0
                 local heal = pdata.healing or 0
                 if dmg > 0 then
-                    o.dpsSum = (o.dpsSum or 0) + (dmg / duration)
+                    o.dpsSum = (o.dpsSum or 0) + (dmg / rateDur)
                     o.dpsSamples = (o.dpsSamples or 0) + 1
                 end
                 if heal > 0 then
-                    o.hpsSum = (o.hpsSum or 0) + (heal / duration)
+                    o.hpsSum = (o.hpsSum or 0) + (heal / rateDur)
                     o.hpsSamples = (o.hpsSamples or 0) + 1
                 end
             end
@@ -1617,17 +1695,21 @@ function Parser:OnCombatEnd(duration)
         O.data.overall.endTime = now
     end
 
-    if UnitExists("target") and UnitLooksLikeBoss("target") then
-        local tname = UnitName("target")
-        if tname and IsUniqueEnemyName(tname) then
-            S.fightIsBoss = true
-            S.fightBossName = tname
-        end
+    -- Boss segment = any unique enemy we damaged this fight matched boss criteria
+    if H.ResolveBossFromDamagedEnemies then
+        H.ResolveBossFromDamagedEnemies(O.data.current)
+    else
+        ResolveBossFromDamagedEnemies(O.data.current)
     end
+    -- Sync into S (OnCombatEnd uses S alias of ST)
+    S.fightIsBoss = ST.fightIsBoss
+    S.fightBossName = ST.fightBossName
 
     if S.fightBossName and not IsUniqueEnemyName(S.fightBossName) then
         S.fightIsBoss = false
         S.fightBossName = nil
+        ST.fightIsBoss = false
+        ST.fightBossName = nil
     end
 
     local label = PickFightLabel()
@@ -1640,7 +1722,7 @@ function Parser:OnCombatEnd(duration)
         break
     end
 
-    if hasData and duration >= 1 then
+    if hasData and duration >= 0.5 then
         local snap = SnapshotSegment(O.data.current)
         PushFront(O.data.recentFights, snap, MAX_RECENT_FIGHTS)
         if snap.isBoss then
@@ -1666,6 +1748,7 @@ function Parser:OnReset()
     S.fightEnemies = {}
     S.fightEnemyDeaths = {}
     S.fightDuplicateNames = {}
+    S.fightEnemyBossLike = {}
     S.fightIsBoss = false
     S.fightBossName = nil
     S.recentAbsorbCaster = {}
