@@ -2624,6 +2624,10 @@ end
 local function AddThreatCheckboxToSettings(f)
     if not f or f._greedThreatCheckbox then return end
 
+    -- Only on General tab page (so it never overlaps Display/Appearance/Modes)
+    local parent = f.pageGeneral
+    if not parent then return end
+
     local extras = OM.extraSettingsCheckboxes or {}
     if table.getn(extras) == 0 then return end
 
@@ -2631,38 +2635,18 @@ local function AddThreatCheckboxToSettings(f)
         return (a.order or 100) < (b.order or 100)
     end)
 
-    -- Rows: parent checkbox + optional child dropdown (counts as 2 rows) + child checkboxes
-    local totalRows = 0
-    local i
-    for i = 1, table.getn(extras) do
-        totalRows = totalRows + 1
-        if extras[i].childDropdown then
-            totalRows = totalRows + 1 -- one combined label+dropdown row
-        end
-        if extras[i].children then
-            totalRows = totalRows + table.getn(extras[i].children)
-        end
-    end
-
-    -- Sit above the bottom Customization / Close buttons (~36-44px)
-    local baseY = 44
     local rowH  = 22
-    local dropH = 32 -- UIDropDownMenu is taller than a checkbox row
-    -- Extra vertical space if any dropdown is present
-    local hasDrop = false
-    for i = 1, table.getn(extras) do
-        if extras[i].childDropdown then hasDrop = true break end
-    end
-    local y = baseY + (totalRows - 1) * rowH + (hasDrop and (dropH - rowH) or 0)
+    local dropH = 32
+    local y = f._threatExtrasY or -260
 
     for i = 1, table.getn(extras) do
         local entry = extras[i]
 
-        local cb = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+        local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
         cb:SetWidth(24)
         cb:SetHeight(24)
-        cb:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 16, y)
-        local fs = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        cb:SetPoint("TOPLEFT", parent, "TOPLEFT", 16, y)
+        local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         fs:SetPoint("LEFT", cb, "RIGHT", 2, 0)
         fs:SetText(entry.label)
         cb.label = fs
@@ -2696,7 +2680,6 @@ local function AddThreatCheckboxToSettings(f)
                     childDropBtn:Disable()
                     childDropBtn:EnableMouse(false)
                 end
-                -- Close any open list
                 if CloseDropDownMenus then CloseDropDownMenus() end
                 if childDrop.label then childDrop.label:SetTextColor(0.5, 0.5, 0.5) end
             end
@@ -2711,6 +2694,9 @@ local function AddThreatCheckboxToSettings(f)
                 SyncChildEnabled(this, c, entry.key)
             end
             SyncDropdownEnabled()
+            if UI.RefreshThreatVisibility then
+                UI.RefreshThreatVisibility(f)
+            end
             if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
         end)
 
@@ -2725,18 +2711,16 @@ local function AddThreatCheckboxToSettings(f)
 
         y = y - rowH
 
-        -- Child dropdown on one row: "Threat view:" label left, dropdown to its right
         if entry.childDropdown then
             local ddInfo = entry.childDropdown
             local opts = ddInfo.options or THREAT_VIEW_OPTIONS
 
-            local lbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            lbl:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 40, y + 6)
+            local lbl = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            lbl:SetPoint("TOPLEFT", parent, "TOPLEFT", 40, y - 2)
             lbl:SetText(ddInfo.label or "View:")
 
             local ddName = "GreedMeterThreatViewDropDown"
-            local dd = CreateFrame("Frame", ddName, f, "UIDropDownMenuTemplate")
-            -- Sit to the right of the label so it never covers the text
+            local dd = CreateFrame("Frame", ddName, parent, "UIDropDownMenuTemplate")
             dd:SetPoint("LEFT", lbl, "RIGHT", -8, -2)
             dd.label = lbl
             childDrop = dd
@@ -2753,8 +2737,10 @@ local function AddThreatCheckboxToSettings(f)
                 if ddInfo.onChange then ddInfo.onChange(opt.key) end
             end
 
+            -- Always list threat-view options. Returning early when threat is off
+            -- left the shared UIDropDownMenu list filled with whatever was last
+            -- opened (e.g. bar fonts like Morpheus).
             local function Init()
-                if OM:GetSetting(entry.key) ~= true then return end
                 local curKey = OM:GetSetting(ddInfo.key) or ddInfo.default or "single"
                 local oi
                 for oi = 1, table.getn(opts) do
@@ -2792,16 +2778,15 @@ local function AddThreatCheckboxToSettings(f)
             y = y - dropH
         end
 
-        -- Optional child checkboxes (legacy)
         if entry.children then
             local ci
             for ci = 1, table.getn(entry.children) do
                 local child = entry.children[ci]
-                local ccb = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
+                local ccb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
                 ccb:SetWidth(20)
                 ccb:SetHeight(20)
-                ccb:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 36, y)
-                local cfs = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+                ccb:SetPoint("TOPLEFT", parent, "TOPLEFT", 36, y)
+                local cfs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
                 cfs:SetPoint("LEFT", ccb, "RIGHT", 2, 0)
                 cfs:SetText(child.label)
                 ccb.label = cfs
@@ -2837,13 +2822,12 @@ local function AddThreatCheckboxToSettings(f)
 
     f._greedThreatCheckbox = true
 
-    -- Grow the frame just enough for threat extras + bottom button strip
-    local threatBlockH = totalRows * rowH + (hasDrop and (dropH - rowH) or 0) + 12
-    local minMain = 300  -- main settings content (checkboxes + right column)
-    local needed = minMain + threatBlockH
-    if needed < 340 then needed = 340 end
-    if f:GetHeight() < needed then
-        f:SetHeight(needed)
+    -- Expand General tab height to include threat block
+    if f.tabHeights then
+        f.tabHeights.general = math.max(f.tabHeights.general or 140, (-y) + 24)
+        if f.activeTab == "general" and f.SelectTab then
+            f.SelectTab("general")
+        end
     end
 end
 

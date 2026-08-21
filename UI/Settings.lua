@@ -168,17 +168,17 @@ function UI:CreateSettingsFrame()
     if self.settingsFrame then return self.settingsFrame end
 
     local f = CreateFrame("Frame", "GreedMeterSettings", UIParent)
-    f:SetWidth(460)
-    f:SetHeight(360)
-    f:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
+    f:SetWidth(720)
+    f:SetHeight(400)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
     f:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
         tile = true, tileSize = 16, edgeSize = 12,
         insets = { left = 3, right = 3, top = 3, bottom = 3 },
     })
-    f:SetBackdropColor(0, 0, 0, 0.92)
-    f:SetBackdropBorderColor(0.5, 0.5, 0.5, 1)
+    f:SetBackdropColor(0, 0, 0, 0.94)
+    f:SetBackdropBorderColor(0.55, 0.55, 0.45, 1)
     f:SetMovable(true)
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
@@ -216,11 +216,100 @@ function UI:CreateSettingsFrame()
         sw:SetTextColor(1, 0.8, 0.3)
     end
 
-    -- Left column: checkboxes (display/appearance options live in Customization)
-    local y = -48
-    AddCheckbox(f, "Lock frame position", 16, y, "lockFrames", "Prevent dragging and resizing")
+    f:SetFrameLevel(50)
+
+    local content = CreateFrame("Frame", nil, f)
+    content:SetFrameLevel(f:GetFrameLevel() + 10)
+    content:EnableMouse(false)
+    content:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -42)
+    content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 40)
+    f.content = content
+
+    local HEADER_PAD = 70
+    local FOOTER_PAD = 40
+    f.tabHeights = { general = 280, display = 260, appearance = 340, modes = 480 }
+
+    local function MakeTabButton(label, x)
+        local b = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+        b:SetWidth(96)
+        b:SetHeight(20)
+        b:SetPoint("TOPLEFT", content, "TOPLEFT", x, 0)
+        b:SetText(label)
+        return b
+    end
+    local tabGeneral = MakeTabButton("General", 0)
+    local tabDisplay = MakeTabButton("Display", 100)
+    local tabAppearance = MakeTabButton("Appearance", 200)
+    local tabModes = MakeTabButton("Modes", 300)
+
+    local function StyleTab(btn, active)
+        local fs = btn.GetFontString and btn:GetFontString() or nil
+        if active then
+            btn:Disable()
+            if fs then fs:SetTextColor(1, 0.85, 0.2) end
+        else
+            btn:Enable()
+            if fs then fs:SetTextColor(1, 1, 1) end
+        end
+    end
+
+    local function MakePage()
+        local page = CreateFrame("Frame", nil, content)
+        page:SetPoint("TOPLEFT", content, "TOPLEFT", 0, -26)
+        page:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+        page:SetFrameLevel(content:GetFrameLevel() + 1)
+        page:EnableMouse(false)
+        page:Hide()
+        return page
+    end
+    local pageGeneral = MakePage()
+    local pageDisplay = MakePage()
+    local pageAppearance = MakePage()
+    local pageModes = MakePage()
+    f.pageGeneral = pageGeneral
+    f.pageDisplay = pageDisplay
+    f.pageAppearance = pageAppearance
+    f.pageModes = pageModes
+
+    local function SelectTab(name)
+        f.activeTab = name
+        pageGeneral:Hide()
+        pageDisplay:Hide()
+        pageAppearance:Hide()
+        pageModes:Hide()
+        StyleTab(tabGeneral, name == "general")
+        StyleTab(tabDisplay, name == "display")
+        StyleTab(tabAppearance, name == "appearance")
+        StyleTab(tabModes, name == "modes")
+        if name == "general" then
+            pageGeneral:Show()
+        elseif name == "display" then
+            pageDisplay:Show()
+        elseif name == "appearance" then
+            pageAppearance:Show()
+        else
+            pageModes:Show()
+            if UI.RefreshThreatVisibility then
+                UI.RefreshThreatVisibility(f)
+            end
+        end
+        local body = (f.tabHeights and f.tabHeights[name]) or 280
+        local h = HEADER_PAD + body + FOOTER_PAD
+        if h < 220 then h = 220 end
+        if h > 780 then h = 780 end
+        f:SetHeight(h)
+    end
+    f.SelectTab = SelectTab
+    tabGeneral:SetScript("OnClick", function() SelectTab("general") end)
+    tabDisplay:SetScript("OnClick", function() SelectTab("display") end)
+    tabAppearance:SetScript("OnClick", function() SelectTab("appearance") end)
+    tabModes:SetScript("OnClick", function() SelectTab("modes") end)
+
+    -- ========== General page ==========
+    local y = 0
+    AddCheckbox(pageGeneral, "Lock frame position", 16, y, "lockFrames", "Prevent dragging and resizing")
     y = y - 24
-    local layoutCb = AddCheckbox(f, "Account-wide layout", 16, y, "accountWideLayout",
+    local layoutCb = AddCheckbox(pageGeneral, "Account-wide layout", 16, y, "accountWideLayout",
         "Share window size, position, and number of open windows across all characters on this account. Uncheck for per-character layouts.")
     layoutCb.onToggle = function(checked)
         if UI.SaveAllFrameLayouts then
@@ -233,14 +322,14 @@ function UI:CreateSettingsFrame()
         end
     end
     y = y - 26
-    local resetPosBtn = CreateButton(f, "Reset Window Positions", 160, 20, function()
+    local resetPosBtn = CreateButton(pageGeneral, "Reset Window Positions", 160, 20, function()
         if UI.ResetFramePositions then
             UI:ResetFramePositions()
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Window positions restored to center.")
         end
     end)
     resetPosBtn:ClearAllPoints()
-    resetPosBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y)
+    resetPosBtn:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 16, y)
     if resetPosBtn.SetScript then
         -- tooltip
         resetPosBtn:SetScript("OnEnter", function()
@@ -254,16 +343,16 @@ function UI:CreateSettingsFrame()
         resetPosBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     end
     y = y - 26
-    AddCheckbox(f, "Confirm before reset", 16, y, "confirmReset", "Show a confirmation popup when pressing Reset")
+    AddCheckbox(pageGeneral, "Confirm before reset", 16, y, "confirmReset", "Show a confirmation popup when pressing Reset")
     y = y - 24
-    AddCheckbox(f, "Party Reset", 16, y, "partyReset",
+    AddCheckbox(pageGeneral, "Party Reset", 16, y, "partyReset",
         "Attempts to reset after joining/leaving a party or raid. Follows confirm settings")
     y = y - 24
-    AddCheckbox(f, "Confirm before announce", 16, y, "confirmAnnounce", "Show a confirmation popup when pressing Announce")
+    AddCheckbox(pageGeneral, "Confirm before announce", 16, y, "confirmAnnounce", "Show a confirmation popup when pressing Announce")
     y = y - 24
-    AddCheckbox(f, "Show total bar", 16, y, "showTotal", "Add a Total row summing all players")
+    AddCheckbox(pageGeneral, "Show total bar", 16, y, "showTotal", "Add a Total row summing all players")
     y = y - 24
-    local testCb = AddCheckbox(f, "Test mode", 16, y, "testMode",
+    local testCb = AddCheckbox(pageGeneral, "Test mode", 16, y, "testMode",
         "Fill the meter with fake 40-player raid data. Uncheck to clear it.")
     testCb.onToggle = function(checked)
         if checked then
@@ -284,16 +373,16 @@ function UI:CreateSettingsFrame()
         end
     end
     y = y - 24
-    AddCheckbox(f, "Merge pet damage", 16, y, "mergePetDamage",
+    AddCheckbox(pageGeneral, "Merge pet damage", 16, y, "mergePetDamage",
         "Combine all pet ability damage into a single \"Pet: Damage\" entry on tooltips")
     y = y - 28
 
     -- Right column: combat log range first, then announce channel + lines together
     local rightX = 250
-    local ry = -48
+    local ry = 0
 
-    local rangeLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    rangeLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
+    local rangeLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    rangeLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", rightX, ry)
     rangeLabel:SetText("Combat log range:")
     ry = ry - 18
 
@@ -324,8 +413,8 @@ function UI:CreateSettingsFrame()
         end
     end
 
-    local rdd = CreateFrame("Frame", "GreedMeterRangeDropDown", f, "UIDropDownMenuTemplate")
-    rdd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
+    local rdd = CreateFrame("Frame", "GreedMeterRangeDropDown", pageGeneral, "UIDropDownMenuTemplate")
+    rdd:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", rightX - 16, ry)
     UIDropDownMenu_Initialize(rdd, RangeDropDown_Init)
     UIDropDownMenu_SetWidth(120, rdd)
     UIDropDownMenu_SetButtonWidth(120, rdd)
@@ -342,8 +431,8 @@ function UI:CreateSettingsFrame()
     -- Leave room under the dropdown button (UIDropDownMenu is tall)
     ry = ry - 42
 
-    local annLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    annLabel:SetPoint("TOPLEFT", f, "TOPLEFT", rightX, ry)
+    local annLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    annLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", rightX, ry)
     annLabel:SetText("Announce channel:")
     ry = ry - 18
 
@@ -371,8 +460,8 @@ function UI:CreateSettingsFrame()
         end
     end
 
-    local dd = CreateFrame("Frame", "GreedMeterChannelDropDown", f, "UIDropDownMenuTemplate")
-    dd:SetPoint("TOPLEFT", f, "TOPLEFT", rightX - 16, ry)
+    local dd = CreateFrame("Frame", "GreedMeterChannelDropDown", pageGeneral, "UIDropDownMenuTemplate")
+    dd:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", rightX - 16, ry)
     UIDropDownMenu_Initialize(dd, ChannelDropDown_Init)
     UIDropDownMenu_SetWidth(120, dd)
     UIDropDownMenu_SetButtonWidth(120, dd)
@@ -388,32 +477,26 @@ function UI:CreateSettingsFrame()
 
     -- Extra gap so the slider sits clearly below the channel dropdown
     ry = ry - 44
-    AddSlider(f, "Announce lines", rightX, ry, "announceLines", 1, 20, 1, 160)
+    AddSlider(pageGeneral, "Announce lines", rightX, ry, "announceLines", 1, 20, 1, 160)
 
-    -- Bottom buttons: Customization (left) + Close (right)
-    -- Reserve ~36px at the bottom for these; Threat extras sit above.
-    local cust = CreateButton(f, "Customization", 110, 20, function()
-        local fn = nil
-        if GreedMeter and GreedMeter.UI then
-            fn = GreedMeter.UI.ToggleCustomization or GreedMeter.UI.ToggleAdvanced
-        end
-        if not fn then
-            fn = UI.ToggleCustomization or UI.ToggleAdvanced
-        end
-        if fn then
-            fn(GreedMeter.UI or UI)
-        else
-            DEFAULT_CHAT_FRAME:AddMessage("|cffff5555GreedMeter:|r Customization handler missing.")
-        end
-    end)
-    cust:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
-    f.customizationBtn = cust
-    f._greedCustomizationBtn = true
+    -- Dynamic height for General from content depth
+    local generalBottom = y or 0
+    if ry and ry < generalBottom then generalBottom = ry end
+    -- Threat module appends "Add threat mode" under announce lines on the General page
+    f._threatExtrasY = generalBottom - 28
+    f.tabHeights.general = math.max(140, (-generalBottom) + 36)
 
     local close = CreateButton(f, "Close", 70, 20, function()
         f:Hide()
     end)
     close:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
+
+    -- Display / Appearance / Modes (former Customization pages)
+    if UI.BuildSettingsExtraPages then
+        UI.BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes)
+    end
+
+    SelectTab("general")
 
     f:Hide()
     self.settingsFrame = f
@@ -424,8 +507,10 @@ function UI:ToggleSettings()
     if not OM.db then OM:InitDB() end
     local f = self:CreateSettingsFrame()
     if f:IsShown() then
+        HidePalette()
         f:Hide()
     else
+        if f.SelectTab then f.SelectTab(f.activeTab or "general") end
         f:Show()
     end
 end
@@ -465,6 +550,15 @@ function UI:OnLoad()
     if self.ApplySettingsToFrames then
         self:ApplySettingsToFrames()
     end
+    -- If Hide out of combat is on and we're not in combat, begin the delayed hide
+    if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
+        if not OM.inCombat then
+            self.oocForceVisible = false
+            if StartOOCFadeOut then
+                StartOOCFadeOut()
+            end
+        end
+    end
     -- Periodic refresh while shown
     if not self.ticker then
         local t = CreateFrame("Frame")
@@ -482,12 +576,113 @@ function UI:OnLoad()
     end
 end
 
+-- Out-of-combat hide: forced visible via minimap until combat or second click
+UI.oocForceVisible = false
+UI._oocFadeElapsed = nil
+UI._oocPendingHide = false
+
+local function CancelOOCHide()
+    UI._oocPendingHide = false
+    UI._oocFadeElapsed = nil
+    if UI._oocFadeFrame then
+        UI._oocFadeFrame:Hide()
+        UI._oocFadeFrame:SetScript("OnUpdate", nil)
+    end
+end
+
+local function ShowAllMeterFrames()
+    local i, f
+    if not UI.frames then return end
+    for i = 1, table.getn(UI.frames) do
+        f = UI.frames[i]
+        if f then
+            f:SetAlpha(1)
+            f:Show()
+            if UI.RefreshFrame then UI:RefreshFrame(f) end
+        end
+    end
+    if UI.mainFrame and not UI.mainFrame:IsShown() then
+        UI.mainFrame:SetAlpha(1)
+        UI.mainFrame:Show()
+        if UI.RefreshFrame then UI:RefreshFrame(UI.mainFrame) end
+    end
+end
+
+local function HideAllMeterFrames()
+    local i, f
+    if not UI.frames then return end
+    for i = 1, table.getn(UI.frames) do
+        f = UI.frames[i]
+        if f then
+            f:SetAlpha(1)
+            f:Hide()
+        end
+    end
+end
+
+local function StartOOCFadeOut()
+    CancelOOCHide()
+    if not UI._oocFadeFrame then
+        UI._oocFadeFrame = CreateFrame("Frame")
+    end
+    UI._oocPendingHide = true
+    UI._oocFadeElapsed = 0
+    local DELAY = 5
+    local FADE = 0.6
+    UI._oocFadeFrame:SetScript("OnUpdate", function()
+        if not UI._oocPendingHide then
+            this:SetScript("OnUpdate", nil)
+            return
+        end
+        -- Combat started or force-show cancelled the hide
+        if OM.inCombat or UI.oocForceVisible then
+            CancelOOCHide()
+            ShowAllMeterFrames()
+            return
+        end
+        if not (OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true) then
+            CancelOOCHide()
+            return
+        end
+        UI._oocFadeElapsed = (UI._oocFadeElapsed or 0) + arg1
+        if UI._oocFadeElapsed < DELAY then
+            return
+        end
+        local t = UI._oocFadeElapsed - DELAY
+        if t >= FADE then
+            HideAllMeterFrames()
+            CancelOOCHide()
+            return
+        end
+        local a = 1 - (t / FADE)
+        if a < 0 then a = 0 end
+        local i, f
+        for i = 1, table.getn(UI.frames) do
+            f = UI.frames[i]
+            if f and f:IsShown() then
+                f:SetAlpha(a)
+            end
+        end
+    end)
+    UI._oocFadeFrame:Show()
+end
+
 function UI:OnCombatStart()
+    CancelOOCHide()
+    UI.oocForceVisible = false
+    if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
+        ShowAllMeterFrames()
+    end
     self:Refresh()
 end
 
 function UI:OnCombatEnd()
     self:Refresh()
+    if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
+        if not UI.oocForceVisible then
+            StartOOCFadeOut()
+        end
+    end
 end
 
 function UI:OnReset()
@@ -597,6 +792,41 @@ end
 -- ============================================================
 
 function UI:ToggleAllFrames()
+    local hideOOC = OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true
+    local inCombat = OM.inCombat and true or false
+
+    -- With Hide out of combat: minimap forces show/hide outside combat.
+    -- First click while hidden → force show; second click → clear force and hide
+    -- (returns to automatic hide-out-of-combat behavior).
+    if hideOOC and not inCombat then
+        CancelOOCHide()
+        if self.oocForceVisible then
+            -- Second click: leave force-show, hide, resume OOC auto-hide
+            self.oocForceVisible = false
+            HideAllMeterFrames()
+        else
+            local anyShown = false
+            local i, f
+            for i = 1, table.getn(self.frames) do
+                f = self.frames[i]
+                if f and f:IsShown() then anyShown = true break end
+            end
+            if anyShown then
+                -- Visible (e.g. still in fade delay): hide and stay on auto OOC
+                self.oocForceVisible = false
+                HideAllMeterFrames()
+            else
+                -- Forced visible while out of combat
+                self.oocForceVisible = true
+                ShowAllMeterFrames()
+            end
+        end
+        if self.SaveAllFrameLayouts then
+            self:SaveAllFrameLayouts()
+        end
+        return
+    end
+
     local anyShown = false
     local _, f
     for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
@@ -609,13 +839,16 @@ function UI:ToggleAllFrames()
         for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
             f:Hide()
         end
+        self.oocForceVisible = false
     else
         for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
             f:Show()
+            f:SetAlpha(1)
             self:RefreshFrame(f)
         end
         if self.mainFrame and not self.mainFrame:IsShown() then
             self.mainFrame:Show()
+            self.mainFrame:SetAlpha(1)
             self:RefreshFrame(self.mainFrame)
         end
     end
@@ -697,6 +930,9 @@ function UI:CreateMinimapButton()
         GameTooltip:SetOwner(this, "ANCHOR_LEFT")
         GameTooltip:AddLine("GreedMeter")
         GameTooltip:AddLine("Left-click: Show / hide meters", 1, 1, 1)
+        if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
+            GameTooltip:AddLine("  (forces show while out of combat; click again to resume auto-hide)", 0.75, 0.75, 0.75)
+        end
         GameTooltip:AddLine("Right-click: Settings", 1, 1, 1)
         GameTooltip:AddLine("Drag: Move around minimap", 0.7, 0.7, 0.7)
         GameTooltip:AddLine("/gdm help for commands", 0.7, 0.7, 0.7)
@@ -1114,7 +1350,7 @@ local function HidePalette()
 end
 
 local function ShowPalette(anchor, mode, onPick)
-    local parent = UI.customizationFrame or UIParent
+    local parent = UI.settingsFrame or UIParent
     local base = 50
     if parent.GetFrameLevel then
         base = parent:GetFrameLevel() or 50
@@ -1290,64 +1526,18 @@ end
 -- Customization window
 -- ============================================================
 
-local function CreateCustomizationFrame()
-    if UI.customizationFrame then return UI.customizationFrame end
+-- Build Display / Appearance / Modes into the main Settings window pages.
+local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes)
+    if not f or not pageDisplay or not pageAppearance or not pageModes then return end
+    if f._extraPagesBuilt then return end
+    f._extraPagesBuilt = true
 
-    local f = CreateFrame("Frame", "GreedMeterCustomization", UIParent)
-    f:SetWidth(720)
-    f:SetHeight(560)
-    f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
-    -- Strata/level BEFORE children so widgets stay above the backdrop
-    f:SetFrameStrata("DIALOG")
-    f:SetFrameLevel(50)
-    -- Manual edge clamp only (no engine SetClampedToScreen)
-    f:SetBackdrop({
-        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-        tile = true, tileSize = 16, edgeSize = 12,
-        insets = { left = 3, right = 3, top = 3, bottom = 3 },
-    })
-    f:SetBackdropColor(0, 0, 0, 0.94)
-    f:SetBackdropBorderColor(0.55, 0.55, 0.45, 1)
-    f:SetMovable(true)
-    f:EnableMouse(true)
-    f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", function()
-        -- Never clamp during drag (native SetClampedToScreen + StartMoving can crash)
-        if this.SetClampedToScreen then this:SetClampedToScreen(false) end
-        this:StartMoving()
-    end)
-    f:SetScript("OnDragStop", function()
-        this:StopMovingOrSizing()
-        if UI.ClampFrameToScreen then
-            UI.ClampFrameToScreen(this)
-        end
-        -- Do not re-enable SetClampedToScreen — manual edge clamp only
-    end)
-
-    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOP", f, "TOP", 0, -10)
-    title:SetText("Customization")
-
-    -- Content sits above the parent backdrop (critical on 1.12)
-    local content = CreateFrame("Frame", nil, f)
-    content:SetFrameLevel(f:GetFrameLevel() + 10)
-    content:EnableMouse(false)
-    content:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -32)
-    content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 40)
-    f.content = content
-
-    local y = 0
     local contentW = 690
 
-    -- ========== Global display options ==========
-    local sec = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    sec:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y)
-    sec:SetText("Display")
-    sec:SetTextColor(1, 0.85, 0.4)
-    y = y - 18
+    -- ========== Display page ==========
+    local y = 0
 
-    local abvCb = MakeCheckbox(content, "Abbreviated Names", 4, y,
+    local abvCb = MakeCheckbox(pageDisplay, "Abbreviated Names", 4, y,
         OM:GetSetting("abbreviateNames") == true,
         function(checked)
             OM:SetSetting("abbreviateNames", checked)
@@ -1357,27 +1547,75 @@ local function CreateCustomizationFrame()
     f.abvCb = abvCb
     y = y - 22
 
-    MakeSettingCheckbox(content, "Show fight duration", 4, y, "showFightDuration",
+    MakeSettingCheckbox(pageDisplay, "Show fight duration", 4, y, "showFightDuration",
         "Show fight time as the first bar (centered, not ranked). Uses mode color when Mode Colors is on.")
     y = y - 22
 
-    MakeSettingCheckbox(content, "Detailed damage/healing", 4, y, "detailedDamage",
+    MakeSettingCheckbox(pageDisplay, "Detailed damage/healing", 4, y, "detailedDamage",
         "OFF by default. When enabled, left-click anywhere on a player bar (not Total/Duration) to open ability details.")
     y = y - 22
 
-    MakeSettingCheckbox(content, "Class colors", 4, y, "classColors", "Color bars by player class")
-    MakeSettingCheckbox(content, "Mode Colors", 150, y, "buttonsColorWithMode",
+    MakeSettingCheckbox(pageDisplay, "Class colors", 4, y, "classColors", "Color bars by player class")
+    MakeSettingCheckbox(pageDisplay, "Mode Colors", 150, y, "buttonsColorWithMode",
         "Tint header buttons and Total bar with each mode's color")
-    MakeSettingCheckbox(content, "Class icons", 300, y, "showClassIcons",
+    MakeSettingCheckbox(pageDisplay, "Class icons", 300, y, "showClassIcons",
         "Show a class icon before each player name on the bars")
     y = y - 22
 
-    local compactCb = MakeSettingCheckbox(content, "Compact Header", 4, y, "hideTitle",
+    local compactCb = MakeSettingCheckbox(pageDisplay, "Compact Header", 4, y, "hideTitle",
         "One-line header with abbreviated button labels (Re, An, Na, Mo, ...)")
     y = y - 20
-    local keepTitleCb = MakeSettingCheckbox(content, "Keep Title in compact", 24, y, "keepTitleInCompact",
+    local keepTitleCb = MakeSettingCheckbox(pageDisplay, "Keep Title in compact", 24, y, "keepTitleInCompact",
         "Show the mode title above the compact one-line controls.", 18)
     f.keepTitleCb = keepTitleCb
+
+    -- Title align: Left / Center / Right (enabled only when Keep Title is on)
+    local function MakeAlignBtn(label, alignKey, x)
+        local b = CreateFrame("Button", nil, pageDisplay, "UIPanelButtonTemplate")
+        b:SetWidth(48)
+        b:SetHeight(18)
+        b:SetPoint("TOPLEFT", pageDisplay, "TOPLEFT", x, y)
+        b:SetText(label)
+        b.alignKey = alignKey
+        b:SetScript("OnClick", function()
+            OM:SetSetting("compactTitleAlign", this.alignKey)
+            if UI.Refresh then UI:Refresh() end
+            if f.SyncAlignButtons then f.SyncAlignButtons() end
+        end)
+        return b
+    end
+    -- Sit to the right of "Keep Title in compact" on the same row
+    local alignLeft = MakeAlignBtn("Left", "LEFT", 280)
+    local alignCenter = MakeAlignBtn("Center", "CENTER", 332)
+    local alignRight = MakeAlignBtn("Right", "RIGHT", 384)
+    f.alignBtns = { alignLeft, alignCenter, alignRight }
+
+    local function SyncAlignButtons()
+        local keepOn = OM:GetSetting("hideTitle") == true and OM:GetSetting("keepTitleInCompact") == true
+        local cur = OM:GetSetting("compactTitleAlign") or "CENTER"
+        local i, b
+        for i = 1, table.getn(f.alignBtns) do
+            b = f.alignBtns[i]
+            local fs = b.GetFontString and b:GetFontString() or nil
+            if keepOn then
+                b:Enable()
+                if fs then
+                    if b.alignKey == cur then
+                        fs:SetTextColor(1, 0.85, 0.2)
+                    else
+                        fs:SetTextColor(1, 1, 1)
+                    end
+                end
+            else
+                b:Disable()
+                if fs then
+                    fs:SetTextColor(0.5, 0.5, 0.5)
+                end
+            end
+        end
+    end
+    f.SyncAlignButtons = SyncAlignButtons
+
     local function SyncKeepTitleEnabled()
         local parentOn = OM:GetSetting("hideTitle") == true
         if parentOn then
@@ -1387,22 +1625,43 @@ local function CreateCustomizationFrame()
             keepTitleCb:Disable()
             if keepTitleCb.label then keepTitleCb.label:SetTextColor(0.5, 0.5, 0.5) end
         end
+        SyncAlignButtons()
     end
     compactCb.onToggle = function()
         SyncKeepTitleEnabled()
     end
+    keepTitleCb.onToggle = function()
+        SyncAlignButtons()
+        if UI.Refresh then UI:Refresh() end
+    end
     SyncKeepTitleEnabled()
     y = y - 24
 
-    MakeDivider(content, y, contentW)
-    y = y - 10
+    MakeSettingCheckbox(pageDisplay, "Hide bar backgrounds", 4, y, "hideBarBackgrounds",
+        "Hide the dark empty track behind each bar; only the filled portion is visible.")
+    y = y - 22
 
-    -- ========== Appearance ==========
-    sec = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    sec:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y)
-    sec:SetText("Appearance")
-    sec:SetTextColor(1, 0.85, 0.4)
-    y = y - 16
+    local hideOOCCb = MakeSettingCheckbox(pageDisplay, "Hide out of combat", 4, y, "hideOutOfCombat",
+        "Hide all meter windows ~5 seconds after combat ends (short fade). They reappear instantly when combat starts. Minimap button can force show/hide while this is on.")
+    hideOOCCb.onToggle = function(checked)
+        if checked then
+            UI.oocForceVisible = false
+            if not OM.inCombat and StartOOCFadeOut then
+                StartOOCFadeOut()
+            end
+        else
+            if CancelOOCHide then CancelOOCHide() end
+            if ShowAllMeterFrames then ShowAllMeterFrames() end
+        end
+    end
+    y = y - 24
+    if f.tabHeights then
+        f.tabHeights.display = math.max(100, (-y) + 16)
+    end
+
+    -- ========== Appearance page ==========
+    y = 0
+
 
     local styleOpts = (UI.GetMergedBarStyles and UI.GetMergedBarStyles()) or (UI.BAR_STYLES or {
         { key = "Default", label = "Default" },
@@ -1417,32 +1676,32 @@ local function CreateCustomizationFrame()
         { key = "never", label = "Never" },
     }
 
-    local styleDD = MakeLabeledDropDown(content, "Bar style:", 4, y, 110, styleOpts, "barStyle")
-    local fontDD = MakeLabeledDropDown(content, "Bar font:", 160, y, 120, fontOpts, "barFont")
-    MakeLabeledDropDown(content, "Number format:", 330, y, 90, NUM_FORMATS, "numberFormat")
+    local styleDD = MakeLabeledDropDown(pageAppearance, "Bar style:", 4, y, 110, styleOpts, "barStyle")
+    local fontDD = MakeLabeledDropDown(pageAppearance, "Bar font:", 160, y, 120, fontOpts, "barFont")
+    MakeLabeledDropDown(pageAppearance, "Number format:", 330, y, 90, NUM_FORMATS, "numberFormat")
     y = y - 48
 
     -- ---- Custom media import ----
-    local importHdr = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    importHdr:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    local importHdr = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    importHdr:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
     importHdr:SetText("Import bar / font from another addon")
     importHdr:SetTextColor(1, 0.85, 0.4)
     y = y - 16
 
-    local exampleFs = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    exampleFs:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    local exampleFs = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    exampleFs:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
     exampleFs:SetText("Example: Interface\\AddOns\\SomeAddon\\media\\statusbar.tga")
     exampleFs:SetTextColor(0.65, 0.65, 0.65)
     y = y - 16
 
     -- Type: Bar texture | Font
     local importKind = "bar"  -- or "font"
-    local kindBar = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    local kindBar = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTemplate")
     kindBar:SetWidth(70)
     kindBar:SetHeight(18)
-    kindBar:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    kindBar:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
     kindBar:SetText("Bar")
-    local kindFont = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    local kindFont = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTemplate")
     kindFont:SetWidth(70)
     kindFont:SetHeight(18)
     kindFont:SetPoint("LEFT", kindBar, "RIGHT", 4, 0)
@@ -1470,12 +1729,12 @@ local function CreateCustomizationFrame()
     UpdateKindButtons()
     y = y - 22
 
-    local pathLabel = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    pathLabel:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    local pathLabel = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    pathLabel:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
     pathLabel:SetText("Path:")
 
-    local pathBox = CreateFrame("EditBox", "GreedMeterMediaPathBox", content)
-    pathBox:SetPoint("TOPLEFT", content, "TOPLEFT", 40, y + 4)
+    local pathBox = CreateFrame("EditBox", "GreedMeterMediaPathBox", pageAppearance)
+    pathBox:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 40, y + 4)
     pathBox:SetWidth(420)
     pathBox:SetHeight(18)
     pathBox:SetAutoFocus(false)
@@ -1494,7 +1753,7 @@ local function CreateCustomizationFrame()
     pathBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
     pathBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
 
-    local importBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    local importBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTemplate")
     importBtn:SetWidth(70)
     importBtn:SetHeight(20)
     importBtn:SetPoint("LEFT", pathBox, "RIGHT", 6, 0)
@@ -1502,8 +1761,8 @@ local function CreateCustomizationFrame()
     y = y - 24
 
     -- List of imported entries (simple text rows + remove)
-    local customListFS = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    customListFS:SetPoint("TOPLEFT", content, "TOPLEFT", 4, y)
+    local customListFS = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    customListFS:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
     customListFS:SetJustifyH("LEFT")
     customListFS:SetWidth(500)
     y = y - 36
@@ -1642,10 +1901,10 @@ local function CreateCustomizationFrame()
         if UI.Refresh then UI:Refresh() end
     end)
 
-local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTemplate")
     clearBtn:SetWidth(120)
     clearBtn:SetHeight(18)
-    clearBtn:SetPoint("TOPLEFT", content, "TOPLEFT", 520, y + 36)
+    clearBtn:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 520, y + 36)
     clearBtn:SetText("Clear Imports")
     clearBtn:SetScript("OnClick", function()
         OM:SetSetting("customBarStyles", {})
@@ -1668,20 +1927,17 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
     RefreshCustomList()
     y = y - 8
 
-    MakeSlider(content, "Bar height", 4, y, "barHeight", 10, 28, 1, 140)
-    MakeSlider(content, "Font size", 200, y, "fontSize", 8, 18, 1, 140)
-    MakeSlider(content, "Background opacity", 400, y, "frameOpacity", 0, 100, 5, 140)
+    MakeSlider(pageAppearance, "Bar height", 4, y, "barHeight", 10, 28, 1, 140)
+    MakeSlider(pageAppearance, "Font size", 200, y, "fontSize", 8, 18, 1, 140)
+    MakeSlider(pageAppearance, "Background opacity", 400, y, "frameOpacity", 0, 100, 5, 140)
     y = y - 40
+    if f.tabHeights then
+        f.tabHeights.appearance = math.max(120, (-y) + 16)
+    end
 
-    MakeDivider(content, y, contentW)
-    y = y - 12
+    -- ========== Modes page ==========
+    y = 0
 
-    -- ========== Modes (two columns) ==========
-    sec = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    sec:SetPoint("TOPLEFT", content, "TOPLEFT", 2, y)
-    sec:SetText("Modes")
-    sec:SetTextColor(1, 0.85, 0.4)
-    y = y - 18
 
     local colWidth = 340
     local leftX = 0
@@ -1696,12 +1952,12 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
     local function BuildModeBlock(entry, baseX, startY)
         local yy = startY
 
-        local header = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        header:SetPoint("TOPLEFT", content, "TOPLEFT", baseX + 4, yy)
+        local header = pageModes:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        header:SetPoint("TOPLEFT", pageModes, "TOPLEFT", baseX + 4, yy)
         header:SetText(entry.label)
         header:SetTextColor(1, 0.85, 0.4)
 
-        local colorBtn = MakeColorSwatch(content, 20, 13)
+        local colorBtn = MakeColorSwatch(pageModes, 20, 13)
         colorBtn:SetPoint("LEFT", header, "RIGHT", 8, 0)
         local cur = (UI.GetModeColor and UI.GetModeColor(entry.mode)) or { 0.5, 0.5, 0.5 }
         colorBtn:SetColor(cur[1], cur[2], cur[3])
@@ -1737,7 +1993,7 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
                 en = UI.IsModeEnabled(entry.mode)
             end
             local enCb
-            enCb = MakeCheckbox(content, "Enabled", x, yy, en, function(checked)
+            enCb = MakeCheckbox(pageModes, "Enabled", x, yy, en, function(checked)
                 local ok = SetModeEnabled(modeKey, checked)
                 if not ok then
                     enCb:SetChecked(1)
@@ -1758,7 +2014,7 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
                     current = UI.GetColumnSetting(entry.mode, col.key)
                 end
                 local colKey = col.key
-                local cb = MakeCheckbox(content, col.label, x, yy, current, function(checked)
+                local cb = MakeCheckbox(pageModes, col.label, x, yy, current, function(checked)
                     SetColumnValue(modeKey, colKey, checked)
                     if UI.Refresh then UI:Refresh() end
                 end, cbSize)
@@ -1781,7 +2037,7 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
             -- Threat has column checkboxes on the first option row; pet option goes under them
             yy = yy - rowH
             local petOn = OM.GetSetting and OM:GetSetting("showPetThreat") == true
-            local petCb = MakeCheckbox(content, "Show pets (SuperWoW recommended)", baseX + 6, yy, petOn, function(checked)
+            local petCb = MakeCheckbox(pageModes, "Show pets (SuperWoW recommended)", baseX + 6, yy, petOn, function(checked)
                 if OM.SetSetting then OM:SetSetting("showPetThreat", checked) end
                 if UI.Refresh then UI:Refresh() end
             end, cbSize, "Show your pet/minion as its own threat row (from Pet: damage in the meter).\nAlso enables solo threat estimates for questing.\nSuperWoW improves pet ownership detection.")
@@ -1789,7 +2045,7 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
         elseif entry.mode == "tank" then
             -- Tank has no column checkboxes; put pet option on the first option row (no empty gap)
             local petTankOn = OM.GetSetting and OM:GetSetting("petAsTank") == true
-            local petTankCb = MakeCheckbox(content, "Use pet as Tank (SuperWoW recommended)", baseX + 6, yy, petTankOn, function(checked)
+            local petTankCb = MakeCheckbox(pageModes, "Use pet as Tank (SuperWoW recommended)", baseX + 6, yy, petTankOn, function(checked)
                 if OM.SetSetting then OM:SetSetting("petAsTank", checked) end
                 if UI.Refresh then UI:Refresh() end
             end, cbSize, "Score tank-mode aggro from your pet/minion instead of you.\nTracks pettarget and whether the pet holds aggro.\nServer tank API is still player-based — this is estimate + unit scan.\nSuperWoW recommended for stable enemy IDs.")
@@ -1815,25 +2071,12 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
     local bottomY = leftY
     if rightY < bottomY then bottomY = rightY end
 
-    local needed = 32 + (-bottomY) + 52
-    if needed < 480 then needed = 480 end
-    if needed > 780 then needed = 780 end
-    f:SetHeight(needed)
-
-    local close = (UI.CreateButton and UI.CreateButton(f, "Close", 70, 20, function()
-        HidePalette()
-        f:Hide()
-    end)) or CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    if not UI.CreateButton then
-        close:SetWidth(70)
-        close:SetHeight(20)
-        close:SetText("Close")
-        close:SetScript("OnClick", function()
-            HidePalette()
-            f:Hide()
-        end)
+    local needed = (-bottomY) + 20
+    if needed < 160 then needed = 160 end
+    if needed > 700 then needed = 700 end
+    if f.tabHeights then
+        f.tabHeights.modes = needed
     end
-    close:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
 
     local reset = UI.CreateButton and UI.CreateButton(f, "Reset Defaults", 110, 20, function()
         OM:SetSetting("columnConfig", nil)
@@ -1889,12 +2132,17 @@ local clearBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
         HidePalette()
     end)
 
-    f:Hide()
-    UI.customizationFrame = f
-    return f
+    if UI.RefreshThreatVisibility then
+        UI.RefreshThreatVisibility(f)
+    end
 end
 
-local function RefreshThreatVisibility(f)
+UI.BuildSettingsExtraPages = BuildSettingsExtraPages
+
+-- After pages exist, apply threat grey state once
+
+
+function UI.RefreshThreatVisibility(f)
     if not f or not f.modeRows then return end
     local threatOn = OM.GetSetting and OM:GetSetting("enableThreatMode") == true
     local r
@@ -1917,6 +2165,15 @@ local function RefreshThreatVisibility(f)
                     row.colorBtn:EnableMouse(false)
                 end
             end
+            if row.enabledCb then
+                if threatOn then
+                    row.enabledCb:Enable()
+                    if row.enabledCb.label then row.enabledCb.label:SetTextColor(1, 1, 1) end
+                else
+                    row.enabledCb:Disable()
+                    if row.enabledCb.label then row.enabledCb.label:SetTextColor(0.5, 0.5, 0.5) end
+                end
+            end
             local c
             for c = 1, table.getn(row.checkboxes) do
                 local cb = row.checkboxes[c]
@@ -1928,58 +2185,38 @@ local function RefreshThreatVisibility(f)
                     if cb.label then cb.label:SetTextColor(0.5, 0.5, 0.5) end
                 end
             end
+            -- Pet options under Threat / Tank
+            local function SyncPetCb(pcb)
+                if not pcb then return end
+                if threatOn then
+                    pcb:Enable()
+                    if pcb.label then pcb.label:SetTextColor(1, 1, 1) end
+                else
+                    pcb:Disable()
+                    if pcb.label then pcb.label:SetTextColor(0.5, 0.5, 0.5) end
+                end
+            end
+            SyncPetCb(row.petThreatCb)
+            SyncPetCb(row.petAsTankCb)
         end
     end
 end
 
 function UI:ToggleCustomization()
+    -- Opens Settings on the Display tab (Customization is folded into Settings)
     EnsureDefaults()
     if not OM.db and OM.InitDB then
         OM:InitDB()
     end
-
-    local ok, f = pcall(CreateCustomizationFrame)
-    if not ok then
-        DEFAULT_CHAT_FRAME:AddMessage("|cffff5555GreedMeter:|r Customization failed: " .. tostring(f))
-        return
-    end
-    if not f then
-        DEFAULT_CHAT_FRAME:AddMessage("|cffff5555GreedMeter:|r Customization frame missing.")
-        return
-    end
-
-    if f:IsShown() then
+    local f = self:CreateSettingsFrame()
+    if f:IsShown() and f.activeTab == "display" then
         HidePalette()
         f:Hide()
         return
     end
-
-    if f.abvCb then
-        f.abvCb:SetChecked((OM:GetSetting("abbreviateNames") == true) and 1 or nil)
-    end
-    local r
-    for r = 1, table.getn(f.modeRows or {}) do
-        local row = f.modeRows[r]
-        if row.colorBtn and UI.GetModeColor then
-            local col = UI.GetModeColor(row.mode)
-            row.colorBtn:SetColor(col[1], col[2], col[3])
-        end
-        if row.enabledCb and UI.IsModeEnabled then
-            row.enabledCb:SetChecked(UI.IsModeEnabled(row.mode) and 1 or nil)
-        end
-    end
-    RefreshThreatVisibility(f)
-
-    -- Close anything that might sit on top / eat clicks
+    if f.SelectTab then f.SelectTab("display") end
     HidePalette()
     if UI.CloseDropdown then UI.CloseDropdown() end
-    if UI.dropdownCloser then UI.dropdownCloser:Hide() end
-
-    -- Do NOT SetFrameLevel here — raising the parent after children exist
-    -- puts the backdrop above the checkboxes on 1.12.
-    f:SetFrameStrata("DIALOG")
-    f:ClearAllPoints()
-    f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
     f:Show()
 end
 

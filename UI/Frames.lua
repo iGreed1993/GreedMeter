@@ -280,6 +280,18 @@ local function KeepTitleInCompact()
     return OM.GetSetting and OM:GetSetting("keepTitleInCompact") == true
 end
 
+local function CompactTitleAlign()
+    local a = OM.GetSetting and OM:GetSetting("compactTitleAlign")
+    if a == "LEFT" or a == "RIGHT" or a == "CENTER" then
+        return a
+    end
+    return "CENTER"
+end
+
+local function HideBarBackgrounds()
+    return OM.GetSetting and OM:GetSetting("hideBarBackgrounds") == true
+end
+
 local function EffectiveFooterHeight()
     -- Locked frames hide the resize grip; keep only a tight 1px bottom gap
     if FramesLocked and FramesLocked() then
@@ -727,6 +739,9 @@ local f = CreateFrame("Frame", name, UIParent)
         bg:SetTexture(tex)
         bg:SetVertexColor(0.15, 0.15, 0.15, 0.85)
         bar.bg = bg
+        if OM.GetSetting and OM:GetSetting("hideBarBackgrounds") == true then
+            bg:Hide()
+        end
 
         -- Optional class icon (size tracks bar height)
         local classIcon = bar:CreateTexture(nil, "OVERLAY")
@@ -945,7 +960,17 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
 
         if keepTitle and f.title then
             f.title:ClearAllPoints()
-            f.title:SetPoint("TOP", f, "TOP", 0, -2)
+            local align = CompactTitleAlign()
+            if align == "LEFT" then
+                f.title:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -2)
+                f.title:SetJustifyH("LEFT")
+            elseif align == "RIGHT" then
+                f.title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -2)
+                f.title:SetJustifyH("RIGHT")
+            else
+                f.title:SetPoint("TOP", f, "TOP", 0, -2)
+                f.title:SetJustifyH("CENTER")
+            end
             f.title:Show()
         end
 
@@ -1091,6 +1116,11 @@ function UI:LayoutBars(f)
         if bar.bg then
             bar.bg:SetTexture(tex)
             bar.bg:SetVertexColor(0.15, 0.15, 0.15, 0.85)
+            if HideBarBackgrounds() then
+                bar.bg:Hide()
+            else
+                bar.bg:Show()
+            end
         end
         if bar.nameText then
             bar.nameText:SetFont(fontPath, fontSize)
