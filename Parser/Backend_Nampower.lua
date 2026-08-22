@@ -263,22 +263,36 @@ local function OnSpellDamage(isSelf)
         end
     end
 
-    -- Periodic damage must not extend the segment idle timer (lingering DoTs)
+    -- DoT tick vs upfront hit (CombatLedger-style):
+    -- effectAuraStr is "effect1,effect2,effect3[,auraType]".
+    -- Upfront Immolate/Rake hits have 3 fields; ticks add auraType as a 4th field.
+    -- Only the 4th field identifies periodic (never treat a 3-field effect code as a DoT).
+    -- SPELL_AURA_PERIODIC_DAMAGE=3, PERIODIC_LEECH=53, PERIODIC_DAMAGE_PERCENT=89
     local isPeriodic = false
-    if effectAuraStr and type(effectAuraStr) == "string" then
-        local _, _, e1, e2, e3, aura = string.find(effectAuraStr, "(%d+),(%d+),(%d+),(%d+)")
-        aura = tonumber(aura)
-        -- SPELL_AURA_PERIODIC_DAMAGE=3, PERIODIC_LEECH=53, PERIODIC_DAMAGE_PERCENT=89
-        if aura == 3 or aura == 53 or aura == 89 then
-            isPeriodic = true
+    if effectAuraStr and type(effectAuraStr) == "string" and effectAuraStr ~= "" then
+        local fields = {}
+        local from = 1
+        while true do
+            local pos = string.find(effectAuraStr, ",", from, true)
+            if not pos then
+                table.insert(fields, string.sub(effectAuraStr, from))
+                break
+            end
+            table.insert(fields, string.sub(effectAuraStr, from, pos - 1))
+            from = pos + 1
         end
-        -- Also treat non-zero effect codes that are pure DoT channels when aura missing
-        if not isPeriodic and not aura then
-            local _, _, a = string.find(effectAuraStr, "(%d+)$")
-            a = tonumber(a)
-            if a == 3 or a == 53 or a == 89 then
+        if table.getn(fields) >= 4 then
+            local aura = tonumber(fields[4])
+            if aura == 3 or aura == 53 or aura == 89 then
                 isPeriodic = true
             end
+        end
+    end
+    -- Siphon Life etc. always tick-shaped when no aura type is present
+    if not isPeriodic and spellId then
+        local sid = tonumber(spellId)
+        if sid == 18881 then
+            isPeriodic = true
         end
     end
 
