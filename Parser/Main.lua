@@ -1,29 +1,13 @@
---[[
+--[[[
     GreedMeter - Parser / Main
     Backend selection and load orchestration.
-
-    Settings (test toggles — no need to uninstall client mods):
-      useNampower — allow Nampower structured events when the DLL is present
-      useSuperWoW — allow SuperWoW RAW + GUID helpers when SuperWoW is present
-
-    Priority when both allowed: Nampower combat events > SuperWoW RAW > pure chat.
+    Priority: Nampower combat events > SuperWoW RAW > pure chat.
     Interrupts always use chat.
 ]]
 
 local OM = GreedMeter
 local NS = GreedMeter.ParserNS
 local Parser = NS.Parser
-
-local function SettingOn(key, default)
-    if OM.GetSetting then
-        local v = OM:GetSetting(key)
-        if v == nil then
-            return default
-        end
-        return v and true or false
-    end
-    return default
-end
 
 local function SuperWoWPresent()
     if NS.SuperWoWAvailable and NS.SuperWoWAvailable() then
@@ -35,8 +19,7 @@ local function SuperWoWPresent()
     return false
 end
 
---- Re-apply combat backends from current settings + installed mods.
---- Safe to call from settings checkboxes (no /reload required).
+--- Re-apply combat backends from installed mods.
 function Parser:SelectBackends()
     local playerName = UnitName("player")
     if NS.ST then
@@ -46,15 +29,11 @@ function Parser:SelectBackends()
     local np = NS.Backends and NS.Backends.Nampower
     local chat = NS.Backends and NS.Backends.Chat
 
-    -- Always enable detected mods (no user toggle)
-    local wantNP = true
-    local wantSW = true
-
     local usedNampower = false
     local useRaw = false
 
-    -- Nampower
-    if wantNP and np and np.Available and np.Available() then
+    -- Nampower when DLL present
+    if np and np.Available and np.Available() then
         if np.Enable and np.Enable() then
             usedNampower = true
         end
@@ -69,7 +48,7 @@ function Parser:SelectBackends()
 
     -- SuperWoW helpers + optional RAW
     local swPresent = SuperWoWPresent()
-    if wantSW and swPresent then
+    if swPresent then
         NS.superwowHelpers = true
         if not Parser._guidTicker and NS.RefreshGuidCacheFromUnits then
             local tick = CreateFrame("Frame")

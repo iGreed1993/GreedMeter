@@ -419,11 +419,6 @@ local function TankViewActive(mode)
     return EffectiveView(mode or "threat") == "tank"
 end
 
-local function OverallViewActive(mode)
-    return EffectiveView(mode or "threat") == "overall"
-end
-
--- Back-compat alias used in a few places
 local function TankingModeEnabled()
     if not OM:GetSetting("enableThreatMode") then return false end
     local v = GetThreatView()

@@ -6,6 +6,7 @@
              environmental damage, deaths.
 
     Interrupts stay on the chat backend (nampower has no reliable interrupt event).
+    Non-damaging threat casts (Sunder, Growl, Torment, …) use AURA_CAST → AddThreatCast.
 
     SuperWoW GUID/pet helpers and threat remain independent of this backend.
 ]]
@@ -172,10 +173,175 @@ local function ResolveTargetName(targetGuid, isOutgoingSelf)
     return tname
 end
 
+-- ============================================================
+-- GUID roster (CombatLedger-style): track player/party/pets by GUID
+-- SuperWoW: UnitExists(unit) returns exists, guid as 2nd value.
+-- ============================================================
+local trackedGuids = {}       -- [guid] = true
+local lastGuidRefresh = 0
+local petGuidToOwner = {}     -- [petGuid] = ownerName
+local guidToUnitName = {}     -- [guid] = unit name (pet or player)
+
+local function NormGuid(g)
+    if not g then return nil end
+    g = string.lower(tostring(g))
+    local _, _, rest = string.find(g, "^0x(.+)$")
+    if rest then return rest end
+    return g
+end
+
+local function GetUnitGuid(unit)
+    if not unit then return nil end
+    if type(UnitGUID) == "function" then
+        local ok, g = pcall(UnitGUID, unit)
+        if ok and g and g ~= "" then return g end
+    end
+    -- SuperWoW / OctoWoW: second return of UnitExists is the GUID
+    if UnitExists then
+        local exists, g = UnitExists(unit)
+        if exists and type(g) == "string" and string.len(g) > 4 then
+            return g
+        end
+    end
+    return nil
+end
+
+local function RegisterGuid(guid, name, ownerName)
+    if not guid then return end
+    local key = NormGuid(guid)
+    if not key then return end
+    trackedGuids[key] = true
+    trackedGuids[guid] = true -- also raw form from events
+    if name and name ~= "" then
+        guidToUnitName[key] = name
+        guidToUnitName[guid] = name
+        CachePair(guid, name)
+    end
+    if ownerName and ownerName ~= "" then
+        petGuidToOwner[key] = ownerName
+        petGuidToOwner[guid] = ownerName
+        if name and name ~= "" then
+            OM.heuristicPets = OM.heuristicPets or {}
+            OM.heuristicPets[name] = ownerName
+        end
+    end
+end
+
+local function RefreshTrackedGuids()
+    trackedGuids = {}
+    petGuidToOwner = {}
+    guidToUnitName = {}
+    lastGuidRefresh = GetTime()
+
+    local function add(unit, ownerUnit)
+        if not UnitExists or not UnitExists(unit) then return end
+        local guid = GetUnitGuid(unit)
+        local name = UnitName(unit)
+        local ownerName = nil
+        if ownerUnit and UnitExists(ownerUnit) then
+            ownerName = UnitName(ownerUnit)
+        end
+        RegisterGuid(guid, name, ownerName)
+    end
+
+    add("player", nil)
+    add("pet", "player")
+
+    local i
+    if GetNumRaidMembers and GetNumRaidMembers() > 0 then
+        for i = 1, 40 do
+            add("raid" .. i, nil)
+            add("raidpet" .. i, "raid" .. i)
+            -- Some clients use raidNpet form
+            add("raid" .. i .. "pet", "raid" .. i)
+        end
+    else
+        for i = 1, 4 do
+            add("party" .. i, nil)
+            add("partypet" .. i, "party" .. i)
+        end
+    end
+end
+
+local function IsTrackedGuid(guid)
+    if not guid then return false end
+    if trackedGuids[guid] then return true end
+    local n = NormGuid(guid)
+    return n and trackedGuids[n] and true or false
+end
+
+local function OwnerNameForGuid(guid)
+    if not guid then return nil end
+    local o = petGuidToOwner[guid] or petGuidToOwner[NormGuid(guid)]
+    return o
+end
+
+local function NameFromGuidOrPet(guid)
+    if not guid then return nil end
+    local n = NameFromGuid(guid)
+    if n then return n end
+    n = guidToUnitName[guid] or guidToUnitName[NormGuid(guid)]
+    if n then return n end
+    -- Live pet match
+    if UnitExists and UnitExists("pet") then
+        local pg = GetUnitGuid("pet")
+        if pg and (pg == guid or NormGuid(pg) == NormGuid(guid)) then
+            local pname = UnitName("pet")
+            if pname then
+                RegisterGuid(guid, pname, UnitName("player"))
+                return pname
+            end
+        end
+    end
+    return nil
+end
+
+-- Resolve event attacker to a name suitable for AddDamage (pet name if pet,
+-- so isPet + ResolveSource still run). Refresh GUID roster every event is cheap enough.
+local function ResolveAttacker(guid, isSelf)
+    local now = GetTime()
+    if (now - (lastGuidRefresh or 0)) > 1.0 then
+        RefreshTrackedGuids()
+        lastGuidRefresh = now
+    elseif UnitExists and UnitExists("pet") and not next(petGuidToOwner) then
+        RefreshTrackedGuids()
+        lastGuidRefresh = now
+    end
+    if isSelf and (not guid or guid == "") then
+        return UnitName("player")
+    end
+    local name = NameFromGuidOrPet(guid)
+    if name then return name end
+    -- Tracked pet GUID but name unknown → use owner name with pet tag via heuristic
+    local owner = OwnerNameForGuid(guid)
+    if owner then
+        -- Synthetic pet label so AddDamage marks isPet and merges to owner
+        local label = "Pet"
+        if UnitExists("pet") and OwnerNameForGuid(guid) == UnitName("player") then
+            label = UnitName("pet") or "Pet"
+        end
+        OM.heuristicPets = OM.heuristicPets or {}
+        OM.heuristicPets[label] = owner
+        return label
+    end
+    if isSelf then return UnitName("player") end
+    return nil
+end
+
 local function IsTrackedName(name)
     if not name then return false end
     if OM.players and OM.players[name] then return true end
     if name == UnitName("player") then return true end
+    if OM.ResolvePetOwner and OM:ResolvePetOwner(name) then return true end
+    if OM.GetPetOwner and OM:GetPetOwner(name) then return true end
+    if OM.heuristicPets and OM.heuristicPets[name] then return true end
+    if UnitExists and UnitExists("pet") and UnitName("pet") == name then return true end
+    return false
+end
+
+local function IsTrackedAttacker(guid, name)
+    if IsTrackedGuid(guid) then return true end
+    if IsTrackedName(name) then return true end
     return false
 end
 
@@ -196,13 +362,12 @@ local function OnAutoAttack(isSelf)
     local hitInfo = tonumber(arg4) or 0
     local victimState = tonumber(arg5)
 
-    local src = NameFromGuid(attackerGuid)
-    if isSelf and not src then src = UnitName("player") end
+    local src = ResolveAttacker(attackerGuid, isSelf)
     local tgt = ResolveTargetName(targetGuid, isSelf and true or false)
-    if src then CachePair(attackerGuid, src) end
+    if src and attackerGuid then CachePair(attackerGuid, src) end
     if tgt and targetGuid then CachePair(targetGuid, tgt) end
 
-    local srcTracked = IsTrackedName(src)
+    local srcTracked = IsTrackedAttacker(attackerGuid, src)
     local tgtTracked = IsTrackedName(tgt)
 
     if totalDamage > 0 then
@@ -245,10 +410,9 @@ local function OnSpellDamage(isSelf)
     -- arg7 = spellSchool, arg8 = effectAuraStr "effect1,effect2,effect3,auraType"
     local effectAuraStr = arg8
 
-    local src = NameFromGuid(casterGuid)
-    if isSelf and not src then src = UnitName("player") end
+    local src = ResolveAttacker(casterGuid, isSelf)
     local tgt = ResolveTargetName(targetGuid, isSelf and true or false)
-    if src then CachePair(casterGuid, src) end
+    if src and casterGuid then CachePair(casterGuid, src) end
     if tgt and targetGuid then CachePair(targetGuid, tgt) end
 
     local spell = SpellName(spellId) or "Unknown"
@@ -297,7 +461,7 @@ local function OnSpellDamage(isSelf)
     end
 
     if amount > 0 then
-        if IsTrackedName(src) then
+        if IsTrackedAttacker(casterGuid, src) then
             Parser:AddDamage(src, amount, spell, tgt, hitType, partial, isPeriodic)
         end
         if IsTrackedName(tgt) then
@@ -310,8 +474,7 @@ local function OnSpellMiss(isSelf)
     -- Nampower SPELL_MISS_*: arg1=casterGuid, arg2=targetGuid, arg3=spellId, arg4=missInfo
     -- (Documented opposite of SPELL_DAMAGE_EVENT which is target, caster.)
     local casterGuid, targetGuid, spellId, missType = arg1, arg2, arg3, arg4
-    local src = NameFromGuid(casterGuid)
-    if isSelf and not src then src = UnitName("player") end
+    local src = ResolveAttacker(casterGuid, isSelf)
     -- isSelf here means player is the caster (outgoing miss), not the target
     local tgt = ResolveTargetName(targetGuid, isSelf and true or false)
     if src then CachePair(casterGuid, src) end
@@ -327,13 +490,13 @@ local function OnSpellMiss(isSelf)
     elseif string.find(lower, "block", 1, true) or tostring(missType) == "5" then
         avoid = "block"
     elseif string.find(lower, "resist", 1, true) then
-        if src and IsTrackedName(src) then
+        if IsTrackedAttacker(casterGuid, src) then
             Parser:AddResist(src, spell, tgt)
         end
         return
     end
 
-    if IsTrackedName(src) then
+    if IsTrackedAttacker(casterGuid, src) then
         Parser:AddMiss(src, spell, tgt, avoid)
     end
     if IsTrackedName(tgt) then
@@ -368,11 +531,29 @@ local function OnDispel()
 end
 
 -- AURA_CAST: spellId, casterGuid, targetGuid [, effect, ...]
+-- Used for hard-CC correlation and for non-damaging threat apps (Sunder,
+-- Growl, Torment, Demo Shout, …) so estimates work without falling back
+-- to chat while Nampower owns combat.
 local function OnAuraCast()
     local spellId, casterGuid, targetGuid = arg1, arg2, arg3
     spellId = tonumber(spellId)
     if not spellId then return end
     local name = SpellName(spellId)
+    if not name or name == "" then return end
+
+    local src = nil
+    if casterGuid then
+        src = NameFromGuid(casterGuid)
+        if src then CachePair(casterGuid, src) end
+    end
+
+    -- Flat threat casts: pet Growl / VW Torment / player Sunder, etc.
+    -- AddThreatCast resolves pets → owner and filters to known abilities.
+    if src and Parser.AddThreatCast then
+        Parser:AddThreatCast(src, name)
+    end
+
+    -- Hard CC path (unchanged)
     if not IsHardCCName(name) then return end
 
     local now = GetTime()
@@ -384,10 +565,6 @@ local function OnAuraCast()
         spellName = name,
         duration = HardCCDuration(name),
     }
-    if casterGuid then
-        local cn = NameFromGuid(casterGuid)
-        if cn then CachePair(casterGuid, cn) end
-    end
 end
 
 -- DEBUFF_ADDED: guid, slot, spellId, stacks, ...
@@ -486,6 +663,7 @@ function NP.Enable()
     end
 
     pendingAuraCasts = {}
+    if RefreshTrackedGuids then RefreshTrackedGuids() end
 
     local f = NP.frame
     if not f then
@@ -518,6 +696,10 @@ function NP.Enable()
     f:RegisterEvent("ENVIRONMENTAL_DMG_SELF")
     f:RegisterEvent("ENVIRONMENTAL_DMG_OTHER")
     f:RegisterEvent("UNIT_DIED")
+    f:RegisterEvent("UNIT_PET")
+    f:RegisterEvent("PLAYER_ENTERING_WORLD")
+    f:RegisterEvent("PARTY_MEMBERS_CHANGED")
+    f:RegisterEvent("RAID_ROSTER_UPDATE")
 
     f:SetScript("OnEvent", function()
         local ev = event
@@ -549,6 +731,9 @@ function NP.Enable()
             OnEnvironmental(false)
         elseif ev == "UNIT_DIED" then
             OnUnitDied()
+        elseif ev == "UNIT_PET" or ev == "PLAYER_ENTERING_WORLD"
+            or ev == "PARTY_MEMBERS_CHANGED" or ev == "RAID_ROSTER_UPDATE" then
+            RefreshTrackedGuids()
         end
     end)
 

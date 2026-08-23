@@ -167,16 +167,6 @@ local function PathLooksLikeFont(p)
     return false
 end
 
-local function PathLooksLikeBarTexture(p)
-    if not p or type(p) ~= "string" then return false end
-    local lower = string.lower(p)
-    if PathLooksLikeFont(lower) then return false end
-    if string.find(lower, "%.tga", 1, false) then return true end
-    if string.find(lower, "%.blp", 1, false) then return true end
-    if string.find(lower, "%.png", 1, false) then return true end
-    return true -- unknown extension: treat as texture only if not a font
-end
-
 -- Move any font paths that were wrongly saved under customBarStyles into customBarFonts.
 local function MigrateMisfiledCustomMedia()
     if not OM.GetSetting or not OM.SetSetting then return end
@@ -651,13 +641,14 @@ local function GetSecondaryText(data, mode, duration, total)
         end
         if show("rate") then
             local dps = nil
-            if data.dpsSamples and data.dpsSamples > 0 and data.dpsSum then
-                dps = data.dpsSum / data.dpsSamples
-            elseif duration and duration > 0 then
-                -- Sub-second fights would explode DPS (250 dmg / 0.001s = 250k)
+            -- Prefer total/duration so Overall matches tooltip (avg of per-fight
+            -- rates diverges from damage/summed duration).
+            if duration and duration > 0 then
                 local d = duration
                 if d < 1 then d = 1 end
                 dps = dmg / d
+            elseif data.dpsSamples and data.dpsSamples > 0 and data.dpsSum then
+                dps = data.dpsSum / data.dpsSamples
             end
             if dps then
                 table.insert(parts, "(" .. FormatNumber(dps) .. ")")
@@ -676,12 +667,12 @@ local function GetSecondaryText(data, mode, duration, total)
         end
         if show("rate") then
             local hps = nil
-            if data.hpsSamples and data.hpsSamples > 0 and data.hpsSum then
-                hps = data.hpsSum / data.hpsSamples
-            elseif duration and duration > 0 then
+            if duration and duration > 0 then
                 local d = duration
                 if d < 1 then d = 1 end
                 hps = eh / d
+            elseif data.hpsSamples and data.hpsSamples > 0 and data.hpsSum then
+                hps = data.hpsSum / data.hpsSamples
             end
             if hps then
                 table.insert(parts, "(" .. FormatNumber(hps) .. ")")

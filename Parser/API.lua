@@ -1,13 +1,7 @@
 --[[
     GreedMeter - Parser / API
-    Shared data plane: player bags, AddDamage/AddMiss/..., segments, combat lifecycle.
-    Chat and Nampower backends call into Parser methods defined here.
-]]
-
---[[
-    GreedMeter - Parser / Main
-    Combat log parsing, metrics, attribution, history.
-    Locale-independent via global combat text patterns.
+    Shared data plane: AddDamage/AddMiss/..., segments, combat lifecycle,
+    GUID helpers. Chat and Nampower backends call Parser methods defined here.
 ]]
 
 local OM = GreedMeter
@@ -1132,6 +1126,15 @@ function Parser:AddDamage(source, amount, spell, target, hitType, partialFlag, i
     end
 
     source = ResolveSource(source)
+    -- Pets always attribute to their owner on the meter (never their own bar).
+    -- mergePetDamage only controls tooltip spell breakdown (one line vs per-ability).
+    if source and OM.GetPetOwner then
+        local owner = OM:GetPetOwner(source)
+        if owner then
+            isPet = true
+            source = owner
+        end
+    end
     if not source or not amount or amount <= 0 then return end
     -- Only record damage from tracked group members (pets resolve to owners above)
     if not OM.players[source] then
@@ -1816,20 +1819,6 @@ end
 -- ============================================================
 
 
--- Cross-file GUID helpers (Nampower backend + SuperWoW share these)
-function Parser:CacheGuid(name, guid)
-    CacheGuid(name, guid)
-end
-
-function Parser:NameFromGuid(guid)
-    if not guid or guid == "" then return nil end
-    local n = guidToName[guid]
-    if n then return n end
-    return nil
-end
-
-
-
 -- ============================================================
 -- Cross-file exports (Lua 5.0 has no shared locals between files)
 -- ============================================================
@@ -1870,15 +1859,12 @@ NS.CacheGuid = CacheGuid
 NS.StripAndCacheGuids = StripAndCacheGuids
 NS.RefreshGuidCacheFromUnits = RefreshGuidCacheFromUnits
 NS.NoteActivity = NoteActivity
-NS.NoteLastHit = NoteLastHit
-NS.NoteSpellOutcome = NoteSpellOutcome
 NS.DeepCopyPlayerData = DeepCopyPlayerData
 NS.SnapshotSegment = SnapshotSegment
 NS.PickFightLabel = PickFightLabel
 NS.PushFront = PushFront
 NS.ClearDispelBuffers = ClearDispelBuffers
 NS.IsUniqueEnemyName = IsUniqueEnemyName
-NS.UnitLooksLikeBoss = UnitLooksLikeBoss
 NS.guidToName = guidToName
 NS.nameToGuid = nameToGuid
 

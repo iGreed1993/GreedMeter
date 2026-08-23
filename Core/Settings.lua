@@ -23,7 +23,7 @@ OM.defaults = {
     compactTitleAlign = "CENTER", -- LEFT / CENTER / RIGHT when keep title is on
     hideBarBackgrounds = false, -- hide dark empty track behind bar fill
     hideOutOfCombat = false, -- fade-hide meter windows shortly after combat ends
-    mergePetDamage = false, -- merge all pet ability damage into a single "Pet: Damage" entry
+    mergePetDamage = false, -- tooltip only: one "Pet: Damage" line vs per-ability; pets always merge to owner on meter
     announceChannel = "AUTO",
     announceLines = 5,
     numberFormat = "100k", -- when to abbreviate: "1k", "10k", "100k", "never"
@@ -35,7 +35,6 @@ OM.defaults = {
     confirmReset = false,
     partyReset = false, -- auto-reset on join/leave party or party→raid
     -- Test toggles: allow forcing backends off while the client mods stay installed
-    useNampower = true,  -- when false, skip nampower structured events even if DLL present
     useSuperWoW = true,  -- when false, skip SuperWoW RAW + GUID helpers even if present
     confirmAnnounce = false,
     accountWideLayout = false, -- when true, window size/pos/count is shared across characters

@@ -373,8 +373,8 @@ function UI:CreateSettingsFrame()
         end
     end
     y = y - 24
-    AddCheckbox(pageGeneral, "Merge pet damage", 16, y, "mergePetDamage",
-        "Combine all pet ability damage into a single \"Pet: Damage\" entry on tooltips")
+    AddCheckbox(pageGeneral, "Merge pet abilities", 16, y, "mergePetDamage",
+        "Pets always count toward their owner on the meter.\nWhen enabled, all pet ability damage is shown as one \"Pet: Damage\" line in tooltips.\nWhen disabled, tooltips list each pet ability (Pet: Bite, Pet: Claw, …).")
     y = y - 28
 
     -- Right column: combat log range first, then announce channel + lines together
@@ -1298,15 +1298,6 @@ local function MakeSlider(parent, label, x, y, settingKey, minV, maxV, step, wid
         if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
     end)
     return slider
-end
-
-local function MakeDivider(parent, y, width)
-    local line = parent:CreateTexture(nil, "ARTWORK")
-    line:SetTexture(0.45, 0.45, 0.40, 0.7)
-    line:SetPoint("TOPLEFT", parent, "TOPLEFT", 4, y)
-    line:SetWidth(width or 680)
-    line:SetHeight(1)
-    return line
 end
 
 local function MakeColorSwatch(parent, width, height)
