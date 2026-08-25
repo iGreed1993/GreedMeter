@@ -405,9 +405,28 @@ local function GetMetric(data, mode)
     return 0
 end
 
--- Active combat duration for a segment (trimmed when possible)
+-- Active combat duration for a segment (trimmed when possible).
+-- Overall = sum of finished-fight durations + live current fight while in combat,
+-- so DPS stays accurate during the first pull (not only after combat ends).
 local function GetSegmentDuration(segment, segmentKey)
     if not segment then return 0 end
+
+    if segmentKey == "overall" then
+        local done = segment.duration or 0
+        if OM.inCombat and OM.data and OM.data.current then
+            local cur = OM.data.current
+            local st = cur.startTime or 0
+            if st > 0 then
+                local live = GetTime() - st
+                if live > 0 then
+                    done = done + live
+                end
+            end
+        end
+        if done > 0 then return done end
+        -- fall through if overall has no recorded time yet
+    end
+
     if segment.duration and segment.duration > 0 then
         return segment.duration
     end

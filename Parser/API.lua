@@ -962,6 +962,14 @@ local function NoteActivity()
         if st <= 0 then
             OM.data.current.startTime = now
         end
+        -- Overall session clock starts on first combat activity
+        if OM.data.overall then
+            local ost = OM.data.overall.startTime or 0
+            if ost <= 0 then
+                OM.data.overall.startTime = now
+            end
+            OM.data.overall.lastActivityTime = now
+        end
     end
 end
 
