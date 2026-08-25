@@ -227,7 +227,7 @@ function UI:CreateSettingsFrame()
 
     local HEADER_PAD = 70
     local FOOTER_PAD = 40
-    f.tabHeights = { general = 280, display = 260, appearance = 340, modes = 480 }
+    f.tabHeights = { general = 320, display = 260, appearance = 340, modes = 560 }
 
     local function MakeTabButton(label, x)
         local b = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
@@ -296,7 +296,7 @@ function UI:CreateSettingsFrame()
         local body = (f.tabHeights and f.tabHeights[name]) or 280
         local h = HEADER_PAD + body + FOOTER_PAD
         if h < 220 then h = 220 end
-        if h > 780 then h = 780 end
+        if h > 920 then h = 920 end
         f:SetHeight(h)
     end
     f.SelectTab = SelectTab
@@ -377,7 +377,111 @@ function UI:CreateSettingsFrame()
         "Pets always count toward their owner on the meter.\nWhen enabled, all pet ability damage is shown as one \"Pet: Damage\" line in tooltips.\nWhen disabled, tooltips list each pet ability (Pet: Bite, Pet: Claw, …).")
     y = y - 28
 
+    -- Threat mode (built into General so it always shows)
+    local threatCb = AddCheckbox(pageGeneral, "Add threat mode", 16, y, "enableThreatMode",
+        "Enables threat metering on meter windows.\nUse the Threat view dropdown to choose Single target, Tank, Overall, or All.")
+    f.threatModeCb = threatCb
+    y = y - 24
+
+    local THREAT_VIEW_OPTS = {
+        { key = "single",  label = "Single target" },
+        { key = "tank",    label = "Tank" },
+        { key = "overall", label = "Overall" },
+        { key = "all",     label = "All" },
+    }
+    local viewLabel = pageGeneral:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    viewLabel:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 36, y)
+    viewLabel:SetText("Threat view:")
+    f.threatViewLabel = viewLabel
+
+    local viewDD = CreateFrame("Frame", "GreedMeterThreatViewDropDown", pageGeneral, "UIDropDownMenuTemplate")
+    viewDD:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 100, y + 6)
+    UIDropDownMenu_SetWidth(120, viewDD)
+    UIDropDownMenu_SetButtonWidth(120, viewDD)
+
+    local function ThreatView_OnClick()
+        local id = this:GetID()
+        local opt = THREAT_VIEW_OPTS[id]
+        if not opt then return end
+        OM:SetSetting("threatView", opt.key)
+        UIDropDownMenu_SetSelectedID(viewDD, id)
+        UIDropDownMenu_SetText(opt.label, viewDD)
+        if OM.extraSettingsCheckboxes then
+            local ei
+            for ei = 1, table.getn(OM.extraSettingsCheckboxes) do
+                local e = OM.extraSettingsCheckboxes[ei]
+                if e and e.childDropdown and e.childDropdown.onChange then
+                    e.childDropdown.onChange(opt.key)
+                    break
+                end
+            end
+        end
+        if UI.Refresh then UI:Refresh() end
+    end
+    local function ThreatView_Init()
+        local cur = OM:GetSetting("threatView") or "single"
+        local oi
+        for oi = 1, table.getn(THREAT_VIEW_OPTS) do
+            local info = {}
+            info.text = THREAT_VIEW_OPTS[oi].label
+            info.func = ThreatView_OnClick
+            info.checked = (THREAT_VIEW_OPTS[oi].key == cur)
+            UIDropDownMenu_AddButton(info)
+        end
+    end
+    UIDropDownMenu_Initialize(viewDD, ThreatView_Init)
+    local curView = OM:GetSetting("threatView") or "single"
+    local sel = 1
+    local oi
+    for oi = 1, table.getn(THREAT_VIEW_OPTS) do
+        if THREAT_VIEW_OPTS[oi].key == curView then sel = oi break end
+    end
+    UIDropDownMenu_SetSelectedID(viewDD, sel)
+    UIDropDownMenu_SetText(THREAT_VIEW_OPTS[sel].label, viewDD)
+    f.threatViewDD = viewDD
+    y = y - 36
+
+    local function SyncThreatGeneralEnabled()
+        local on = OM:GetSetting("enableThreatMode") == true
+        if viewLabel then
+            if on then viewLabel:SetTextColor(1, 1, 1) else viewLabel:SetTextColor(0.5, 0.5, 0.5) end
+        end
+        local btn = getglobal("GreedMeterThreatViewDropDownButton")
+        if on then
+            if UIDropDownMenu_EnableDropDown then UIDropDownMenu_EnableDropDown(viewDD) end
+            if btn then btn:Enable(); btn:EnableMouse(true) end
+        else
+            if UIDropDownMenu_DisableDropDown then UIDropDownMenu_DisableDropDown(viewDD) end
+            if btn then btn:Disable(); btn:EnableMouse(false) end
+        end
+        if UI.RefreshThreatVisibility then
+            pcall(UI.RefreshThreatVisibility, f)
+        end
+    end
+    f.SyncThreatGeneralEnabled = SyncThreatGeneralEnabled
+
+    if threatCb then
+        threatCb:SetScript("OnClick", function()
+            local checked = this:GetChecked() and true or false
+            OM:SetSetting("enableThreatMode", checked)
+            if OM.extraSettingsCheckboxes then
+                local ei
+                for ei = 1, table.getn(OM.extraSettingsCheckboxes) do
+                    local e = OM.extraSettingsCheckboxes[ei]
+                    if e and e.key == "enableThreatMode" and e.onToggle then
+                        e.onToggle(checked)
+                        break
+                    end
+                end
+            end
+            SyncThreatGeneralEnabled()
+            if UI.Refresh then UI:Refresh() end
+        end)
+    end
+    SyncThreatGeneralEnabled()
+
     -- Right column: combat log range first, then announce channel + lines together
+
     local rightX = 250
     local ry = 0
 
@@ -1518,6 +1622,45 @@ end
 -- ============================================================
 
 -- Build Display / Appearance / Modes into the main Settings window pages.
+
+local function SafeSetEnabled(widget, enabled)
+    if not widget then return end
+    if enabled then
+        if widget.Enable then widget:Enable() end
+        if widget.EnableMouse then widget:EnableMouse(true) end
+        if widget.SetAlpha then widget:SetAlpha(1) end
+        if widget.label and widget.label.SetTextColor then
+            widget.label:SetTextColor(1, 1, 1)
+        end
+    else
+        if widget.Disable then widget:Disable() end
+        if widget.EnableMouse then widget:EnableMouse(false) end
+        if widget.SetAlpha then widget:SetAlpha(0.5) end
+        if widget.label and widget.label.SetTextColor then
+            widget.label:SetTextColor(0.5, 0.5, 0.5)
+        end
+    end
+end
+
+local function SyncDropDownEnabled(dd, enabled)
+    if not dd then return end
+    local btn = nil
+    if dd.GetName then
+        local n = dd:GetName()
+        if n then btn = getglobal(n .. "Button") end
+    end
+    if enabled then
+        if UIDropDownMenu_EnableDropDown then UIDropDownMenu_EnableDropDown(dd) end
+        if btn then btn:Enable(); btn:EnableMouse(true) end
+        dd:EnableMouse(true)
+    else
+        if UIDropDownMenu_DisableDropDown then UIDropDownMenu_DisableDropDown(dd) end
+        if btn then btn:Disable(); btn:EnableMouse(false) end
+        dd:EnableMouse(false)
+        if CloseDropDownMenus then CloseDropDownMenus() end
+    end
+end
+
 local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes)
     if not f or not pageDisplay or not pageAppearance or not pageModes then return end
     if f._extraPagesBuilt then return end
@@ -2033,6 +2176,58 @@ local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTempla
                 if UI.Refresh then UI:Refresh() end
             end, cbSize, "Show your pet/minion as its own threat row (from Pet: damage in the meter).\nAlso enables solo threat estimates for questing.\nSuperWoW improves pet ownership detection.")
             row.petThreatCb = petCb
+
+            -- Single-target threat warnings (never used in tank / overall views)
+            yy = yy - rowH
+            local sndOn = OM.GetSetting and OM:GetSetting("threatWarnSound") == true
+            local sndCb = MakeCheckbox(pageModes, "Threat warning sound", baseX + 6, yy, sndOn, function(checked)
+                if OM.SetSetting then OM:SetSetting("threatWarnSound", checked) end
+                if row.threatWarnSoundDD then
+                    local on = checked and (OM:GetSetting("enableThreatMode") == true)
+                    SyncDropDownEnabled(row.threatWarnSoundDD, on)
+                end
+            end, cbSize, "Play a sound when your threat on the current target reaches the warning threshold.\nOnly active in single-target Threat mode (not Tank or Overall).")
+            row.threatWarnSoundCb = sndCb
+
+            local soundOpts = {
+                { key = "raidwarning", label = "Raid Warning" },
+                { key = "questfail",   label = "Quest Failed" },
+                { key = "mapping",     label = "Map Ping" },
+                { key = "bellally",    label = "Alliance Bell" },
+                { key = "bellhorde",   label = "Horde Bell" },
+                { key = "bellne",      label = "Night Elf Bell" },
+                { key = "auction",     label = "Auction Open" },
+            }
+            -- Dropdown beside the checkbox (no extra row)
+            local sndDD = MakeLabeledDropDown(pageModes, "", baseX + 175, yy + 16, 130, soundOpts, "threatWarnSoundFile", function(entry)
+                -- Preview selection
+                local paths = {
+                    raidwarning = "Sound\\Interface\\RaidWarning.wav",
+                    questfail   = "Sound\\Interface\\igQuestFailed.wav",
+                    mapping     = "Sound\\Interface\\MapPing.wav",
+                    bellally    = "Sound\\Doodad\\BellTollAlliance.wav",
+                    bellhorde   = "Sound\\Doodad\\BellTollHorde.wav",
+                    bellne      = "Sound\\Doodad\\BellTollNightElf.wav",
+                    auction     = "Sound\\Interface\\AuctionWindowOpen.wav",
+                }
+                if entry and entry.key and paths[entry.key] then
+                    pcall(PlaySoundFile, paths[entry.key])
+                end
+            end)
+            row.threatWarnSoundDD = sndDD
+
+            yy = yy - rowH
+            local glowOn = OM.GetSetting and OM:GetSetting("threatWarnGlow") == true
+            local glowCb = MakeCheckbox(pageModes, "Threat warning glow", baseX + 6, yy, glowOn, function(checked)
+                if OM.SetSetting then OM:SetSetting("threatWarnGlow", checked) end
+            end, cbSize, "Red screen-edge glow while your threat is at or above the warning threshold.\nOnly active in single-target Threat mode (not Tank or Overall).")
+            row.threatWarnGlowCb = glowCb
+
+            yy = yy - rowH
+            local warnPct = tonumber(OM.GetSetting and OM:GetSetting("threatWarnPercent")) or 90
+            local warnSlider = MakeSlider(pageModes, "Warn at threat %", baseX + 6, yy, "threatWarnPercent", 50, 100, 1, 160)
+            row.threatWarnSlider = warnSlider
+            yy = yy - 28
         elseif entry.mode == "tank" then
             -- Tank has no column checkboxes; put pet option on the first option row (no empty gap)
             local petTankOn = OM.GetSetting and OM:GetSetting("petAsTank") == true
@@ -2064,7 +2259,7 @@ local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTempla
 
     local needed = (-bottomY) + 20
     if needed < 160 then needed = 160 end
-    if needed > 700 then needed = 700 end
+    if needed > 900 then needed = 900 end
     if f.tabHeights then
         f.tabHeights.modes = needed
     end
@@ -2147,48 +2342,21 @@ function UI.RefreshThreatVisibility(f)
                     row.header:SetTextColor(0.5, 0.5, 0.5)
                 end
             end
-            if row.colorBtn then
-                if threatOn then
-                    row.colorBtn:Enable()
-                    row.colorBtn:EnableMouse(true)
-                else
-                    row.colorBtn:Disable()
-                    row.colorBtn:EnableMouse(false)
-                end
-            end
-            if row.enabledCb then
-                if threatOn then
-                    row.enabledCb:Enable()
-                    if row.enabledCb.label then row.enabledCb.label:SetTextColor(1, 1, 1) end
-                else
-                    row.enabledCb:Disable()
-                    if row.enabledCb.label then row.enabledCb.label:SetTextColor(0.5, 0.5, 0.5) end
-                end
-            end
+            SafeSetEnabled(row.colorBtn, threatOn)
+            SafeSetEnabled(row.enabledCb, threatOn)
             local c
             for c = 1, table.getn(row.checkboxes) do
-                local cb = row.checkboxes[c]
-                if threatOn then
-                    cb:Enable()
-                    if cb.label then cb.label:SetTextColor(1, 1, 1) end
-                else
-                    cb:Disable()
-                    if cb.label then cb.label:SetTextColor(0.5, 0.5, 0.5) end
-                end
+                SafeSetEnabled(row.checkboxes[c], threatOn)
             end
-            -- Pet options under Threat / Tank
-            local function SyncPetCb(pcb)
-                if not pcb then return end
-                if threatOn then
-                    pcb:Enable()
-                    if pcb.label then pcb.label:SetTextColor(1, 1, 1) end
-                else
-                    pcb:Disable()
-                    if pcb.label then pcb.label:SetTextColor(0.5, 0.5, 0.5) end
-                end
+            SafeSetEnabled(row.petThreatCb, threatOn)
+            SafeSetEnabled(row.petAsTankCb, threatOn)
+            SafeSetEnabled(row.threatWarnSoundCb, threatOn)
+            SafeSetEnabled(row.threatWarnGlowCb, threatOn)
+            SafeSetEnabled(row.threatWarnSlider, threatOn)
+            if row.threatWarnSoundDD then
+                local soundOn = threatOn and OM:GetSetting("threatWarnSound") == true
+                SyncDropDownEnabled(row.threatWarnSoundDD, soundOn)
             end
-            SyncPetCb(row.petThreatCb)
-            SyncPetCb(row.petAsTankCb)
         end
     end
 end

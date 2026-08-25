@@ -61,6 +61,18 @@ end
 if OM.defaults.showPetThreat == nil then
     OM.defaults.showPetThreat = false
 end
+if OM.defaults.threatWarnSound == nil then
+    OM.defaults.threatWarnSound = true
+end
+if OM.defaults.threatWarnGlow == nil then
+    OM.defaults.threatWarnGlow = true
+end
+if OM.defaults.threatWarnPercent == nil then
+    OM.defaults.threatWarnPercent = 90
+end
+if OM.defaults.threatWarnSoundFile == nil then
+    OM.defaults.threatWarnSoundFile = "raidwarning"
+end
 if OM.defaults.petAsTank == nil then
     OM.defaults.petAsTank = false
 end
@@ -2177,6 +2189,146 @@ end
 
 -- TargetEnemy is defined above with SuperWoW GUID support
 
+
+-- ============================================================
+-- Threat warnings (single-target view only — not tank / overall)
+-- ============================================================
+local warnGlowFrame = nil
+local warnSoundArmed = true
+
+-- Built-in client sounds for threat warning (key -> PlaySoundFile path)
+local WARN_SOUND_FILES = {
+    raidwarning = "Sound\\Interface\\RaidWarning.wav",
+    questfail   = "Sound\\Interface\\igQuestFailed.wav",
+    mapping     = "Sound\\Interface\\MapPing.wav",
+    bellally    = "Sound\\Doodad\\BellTollAlliance.wav",
+    bellhorde   = "Sound\\Doodad\\BellTollHorde.wav",
+    bellne      = "Sound\\Doodad\\BellTollNightElf.wav",
+    auction     = "Sound\\Interface\\AuctionWindowOpen.wav",
+}
+
+local function GetWarnSoundPath()
+    local key = OM.GetSetting and OM:GetSetting("threatWarnSoundFile")
+    if key and WARN_SOUND_FILES[key] then
+        return WARN_SOUND_FILES[key]
+    end
+    return WARN_SOUND_FILES.raidwarning
+end
+
+local function EnsureWarnGlow()
+    if warnGlowFrame then return warnGlowFrame end
+    local f = CreateFrame("Frame", "GreedMeterThreatWarnGlow", UIParent)
+    f:SetFrameStrata("FULLSCREEN_DIALOG")
+    f:SetAllPoints(UIParent)
+    f:Hide()
+    local edges = {
+        { "TOP",    0, 0, 1, 0.12 },
+        { "BOTTOM", 0, 0, 1, 0.12 },
+        { "LEFT",   0, 0, 0.08, 1 },
+        { "RIGHT",  0, 0, 0.08, 1 },
+    }
+    local i
+    for i = 1, table.getn(edges) do
+        local e = edges[i]
+        local t = f:CreateTexture(nil, "BACKGROUND")
+        t:SetTexture(1, 0.05, 0.05, 0.55)
+        if e[1] == "TOP" then
+            t:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+            t:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, 0)
+            t:SetHeight(UIParent:GetHeight() * e[5])
+        elseif e[1] == "BOTTOM" then
+            t:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, 0)
+            t:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
+            t:SetHeight(UIParent:GetHeight() * e[5])
+        elseif e[1] == "LEFT" then
+            t:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+            t:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, 0)
+            t:SetWidth(UIParent:GetWidth() * e[4])
+        else
+            t:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, 0)
+            t:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
+            t:SetWidth(UIParent:GetWidth() * e[4])
+        end
+    end
+    warnGlowFrame = f
+    return f
+end
+
+local function HideThreatWarnGlow()
+    if warnGlowFrame then warnGlowFrame:Hide() end
+end
+
+local function ShowThreatWarnGlow()
+    local f = EnsureWarnGlow()
+    f:Show()
+end
+
+local function PlayerThreatPercent()
+    local me = UnitName("player")
+    if not me then return 0 end
+    local d = Threat.threats and Threat.threats[me]
+    if d and d.perc then
+        return tonumber(d.perc) or 0
+    end
+    -- Fall back: relative to max on the list
+    local maxT = 0
+    local myT = 0
+    local n, row
+    for n, row in pairs(Threat.threats or {}) do
+        if row and not row.isPull and not row.isEnemy then
+            local t = tonumber(row.threat) or 0
+            if t > maxT then maxT = t end
+            if n == me then myT = t end
+        end
+    end
+    if maxT <= 0 then return 0 end
+    return (myT / maxT) * 100
+end
+
+local function ThreatWarningsAllowed()
+    if not OM:GetSetting("enableThreatMode") then return false end
+    local v = GetThreatView()
+    -- Only single-target (and "all" which includes single). Never tank-only or overall-only.
+    if v == "tank" or v == "overall" then return false end
+    return true
+end
+
+local function UpdateThreatWarnings()
+    if not ThreatWarningsAllowed() then
+        HideThreatWarnGlow()
+        warnSoundArmed = true
+        return
+    end
+    local threshold = tonumber(OM:GetSetting("threatWarnPercent")) or 90
+    if threshold < 50 then threshold = 50 end
+    if threshold > 100 then threshold = 100 end
+
+    local perc = PlayerThreatPercent()
+    local over = perc >= threshold
+
+    if OM:GetSetting("threatWarnGlow") == true and over then
+        ShowThreatWarnGlow()
+    else
+        HideThreatWarnGlow()
+    end
+
+    if OM:GetSetting("threatWarnSound") == true then
+        if over and warnSoundArmed then
+            warnSoundArmed = false
+            local path = GetWarnSoundPath()
+            local ok = pcall(PlaySoundFile, path)
+            if not ok then
+                pcall(PlaySound, "RaidWarning")
+            end
+        elseif not over then
+            warnSoundArmed = true
+        end
+    else
+        warnSoundArmed = true
+    end
+end
+
+
 -- Drive the meter bars for threat mode. Frames.lua captures local copies of
 -- BuildSortedList / GetMetric / GetSecondaryText at load time, so replacing
 -- UI.BuildSortedList never reaches RefreshFrame. We therefore own the full
@@ -2617,7 +2769,12 @@ local function ThreatViewLabel(key)
 end
 
 local function AddThreatCheckboxToSettings(f)
-    if not f or f._greedThreatCheckbox then return end
+    if not f then return end
+    -- Settings.lua now builds Add threat mode on General natively
+    if f.threatModeCb or f._greedThreatCheckbox then
+        f._greedThreatCheckbox = true
+        return
+    end
 
     -- Only on General tab page (so it never overlaps Display/Appearance/Modes)
     local parent = f.pageGeneral
@@ -2632,7 +2789,9 @@ local function AddThreatCheckboxToSettings(f)
 
     local rowH  = 22
     local dropH = 32
-    local y = f._threatExtrasY or -260
+    local y = f._threatExtrasY
+    if not y then y = -220 end
+    if y > -40 then y = -40 end
 
     for i = 1, table.getn(extras) do
         local entry = extras[i]
@@ -2819,10 +2978,12 @@ local function AddThreatCheckboxToSettings(f)
 
     -- Expand General tab height to include threat block
     if f.tabHeights then
-        f.tabHeights.general = math.max(f.tabHeights.general or 140, (-y) + 24)
-        if f.activeTab == "general" and f.SelectTab then
-            f.SelectTab("general")
-        end
+        local need = (-y) + 36
+        if need < 180 then need = 180 end
+        f.tabHeights.general = math.max(f.tabHeights.general or 140, need)
+    end
+    if f.SelectTab then
+        f.SelectTab(f.activeTab or "general")
     end
 end
 
@@ -3194,6 +3355,8 @@ eventFrame:SetScript("OnUpdate", function()
     -- Do not overwrite with estimates until the API times out.
     end
 
+    UpdateThreatWarnings()
+
     if UI.Refresh then
         UI:Refresh()
     end
@@ -3210,6 +3373,10 @@ function Threat:OnLoad()
     if OM.db then
         if OM.db.enableThreatMode == nil then OM.db.enableThreatMode = false end
         if OM.db.showPetThreat == nil then OM.db.showPetThreat = false end
+        if OM.db.threatWarnSound == nil then OM.db.threatWarnSound = true end
+        if OM.db.threatWarnGlow == nil then OM.db.threatWarnGlow = true end
+        if OM.db.threatWarnPercent == nil then OM.db.threatWarnPercent = 90 end
+        if OM.db.threatWarnSoundFile == nil then OM.db.threatWarnSoundFile = "raidwarning" end
         if OM.db.petAsTank == nil then OM.db.petAsTank = false end
         if OM.db.threatView == nil then
             -- migrate legacy tank checkbox
@@ -3275,6 +3442,12 @@ function Threat:OnLoad()
     })
 
     EnsureModeInList(OM:GetSetting("enableThreatMode") == true)
+
+    -- Settings may have been built before extras were registered; attach now
+    if UI and UI.settingsFrame then
+        UI.settingsFrame._greedThreatCheckbox = nil
+        AddThreatCheckboxToSettings(UI.settingsFrame)
+    end
 
     -- If both threat + test were already on from a previous session, fill test threat
     if OM:GetSetting("enableThreatMode") and OM:GetSetting("testMode") then

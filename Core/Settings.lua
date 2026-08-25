@@ -43,6 +43,10 @@ OM.defaults = {
     customBarStyles = {}, -- user-imported bar textures { key, label, texture }
     customBarFonts = {},  -- user-imported fonts { key, label, path }
     showPetThreat = false, -- threat mode: show local pet as its own row
+    threatWarnSound = true, -- single-target threat: play sound at threshold
+    threatWarnGlow = true, -- single-target threat: full-screen edge glow
+    threatWarnPercent = 90, -- warn when your threat % reaches this
+    threatWarnSoundFile = "raidwarning", -- key into sound list
     petAsTank = false,    -- tank mode: score aggro from pet instead of player
 }
 
