@@ -149,7 +149,7 @@ local function CachePair(guid, name)
     end
 end
 
--- When GUID→name fails for our own outgoing hit, prefer current target if GUID matches.
+-- When GUID→name fails for an outgoing hit, prefer current target if GUID matches.
 local function ResolveTargetName(targetGuid, isOutgoingSelf)
     local tgt = NameFromGuid(targetGuid)
     if tgt then return tgt end

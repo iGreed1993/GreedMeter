@@ -586,7 +586,6 @@ function UI:CreateSettingsFrame()
     -- Dynamic height for General from content depth
     local generalBottom = y or 0
     if ry and ry < generalBottom then generalBottom = ry end
-    -- Threat module appends "Add threat mode" under announce lines on the General page
     f._threatExtrasY = generalBottom - 28
     f.tabHeights.general = math.max(140, (-generalBottom) + 36)
 
@@ -595,7 +594,7 @@ function UI:CreateSettingsFrame()
     end)
     close:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -12, 12)
 
-    -- Display / Appearance / Modes (former Customization pages)
+    -- Display / Appearance / Modes pages
     if UI.BuildSettingsExtraPages then
         UI.BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes)
     end
@@ -654,7 +653,7 @@ function UI:OnLoad()
     if self.ApplySettingsToFrames then
         self:ApplySettingsToFrames()
     end
-    -- If Hide out of combat is on and we're not in combat, begin the delayed hide
+    -- If Hide out of combat is on and combat is over, begin the delayed hide
     if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
         if not OM.inCombat then
             self.oocForceVisible = false
@@ -1894,7 +1893,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     importBtn:SetText("Import")
     y = y - 24
 
-    -- List of imported entries (simple text rows + remove)
+    -- Import status line
     local customListFS = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     customListFS:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
     customListFS:SetJustifyH("LEFT")
@@ -1903,10 +1902,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
 
     local removeBtns = {}
 
-    -- Accept full OS paths, either slash style, any casing of Interface/Fonts.
-    -- Strips everything before Interface\\ or Fonts\\.
-    -- Also accepts addon-relative paths like: UI-Reforged\\media\\bar.tga
-    --   -> Interface\\AddOns\\UI-Reforged\\media\\bar.tga
+    -- Normalize a pasted texture/font path to a WoW-loadable Interface\\ or Fonts\\ path.
     local function NormalizePath(p)
         if not p then return "" end
         p = string.gsub(p, "^%s+", "")
@@ -1928,13 +1924,13 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
             return "Fonts" .. string.sub(p, s + 5)
         end
 
-        -- "AddOns\\Foo\\bar.tga" (missing Interface\\)
+        -- Path starts at AddOns\\
         s = string.find(lower, "addons\\", 1, true)
         if s then
             return "Interface\\AddOns" .. string.sub(p, s + 6)
         end
 
-        -- Bare addon path: "UI-Reforged\\media\\bar.tga"
+        -- Addon-relative path (folder\\file.tga)
         if string.find(lower, "%.tga") or string.find(lower, "%.blp")
             or string.find(lower, "%.png") or string.find(lower, "%.ttf")
             or string.find(lower, "%.otf") then
@@ -2383,7 +2379,7 @@ function UI.RefreshThreatVisibility(f)
 end
 
 function UI:ToggleCustomization()
-    -- Opens Settings on the Display tab (Customization is folded into Settings)
+    -- Opens Settings on the Display tab
     EnsureDefaults()
     if not OM.db and OM.InitDB then
         OM:InitDB()

@@ -236,7 +236,7 @@ combatlog_parser[PERIODICAURADAMAGEOTHERSELF] = function(d, value, school, sourc
 end
 
 -- ---------- Damage shields / reflection (Thorns, Retribution, etc.) ----------
--- Source here is the buffed unit. We re-attribute to the applicator in ParseMessage.
+-- Source here is the buffed unit. Re-attributed to the applicator in ParseMessage.
 -- Typical globals:
 --   DAMAGESHIELDSELFOTHER  = "You reflect %d %s damage to %s."
 --   DAMAGESHIELDOTHERSELF  = "%s reflects %d %s damage to you."
@@ -656,12 +656,8 @@ local DISPEL_SPELLS = {
     ["Restorative Potion"] = true,
 }
 
--- Periodic / multi-tick cleanses. These apply a lasting effect that can remove
--- multiple diseases/poisons over time. For them we ONLY credit direct combat-log
--- lines that explicitly name the ability as the remover (e.g. "X's Abolish Disease
--- removes Y from Z"). We never pair their cast with nearby "effect fades" messages,
--- because the removals can happen long after the cast and the fades are unreliable
--- for attribution.
+-- Periodic / multi-tick cleanses. Credit only combat-log lines that name the
+-- ability as the remover. Do not pair their cast with nearby fade messages.
 local PERIODIC_DISPEL_SPELLS = {
     ["Abolish Disease"] = true,
     ["Abolish Poison"] = true,
@@ -683,19 +679,11 @@ local function IsDispelSpell(spell)
     return SpellInSet(DISPEL_SPELLS, spell)
 end
 
--- Dispel matching: combat log order is unreliable. The fade line can appear
--- before or after "X casts Purify". Keep short buffers of both and pair them
--- carefully so natural expirations are not counted as dispels.
---
--- Rules for cast↔fade pairing:
---   1. Only pair fades of auras we previously saw applied as harmful
---      ("X is afflicted by SPELL"). Friendly buffs / unknown fades are ignored.
---   2. If the cast names a target, the fade must be on that same target.
---   3. Direct "X removes Y from Z" lines always win and suppress nearby pairing.
---
--- Exception: PERIODIC_DISPEL_SPELLS (Abolish Disease/Poison, cleansing totems)
--- never enter the cast↔fade pairing path. Their removals are only credited when
--- the combat log explicitly names the ability as the remover.
+-- Dispel matching: combat log order is unreliable. Buffer casts and fades
+-- and pair them so natural expirations are not counted as dispels.
+-- Pair only fades of auras previously applied as harmful. Named-target casts
+-- must match that target. Direct "X removes Y from Z" lines win.
+-- PERIODIC_DISPEL_SPELLS never use cast↔fade pairing.
 local PENDING_DISPEL_WINDOW = 1.25  -- others' cast↔fade lines can be farther apart than self "You remove"
 local HARMFUL_AURA_TTL = 180  -- remember afflictions this long for fade matching
 local recentDispelFades = {}  -- { { spell, target, time }, ... }
@@ -800,7 +788,7 @@ local function ClearHarmfulAura(target, spell)
     end
 end
 
--- True if we saw this unit afflicted by this spell recently (and it was not friendly).
+-- True if this unit was afflicted by this spell recently (and it was not friendly).
 local function IsTrackedHarmfulAura(target, spell)
     target = NormalizeName(target)
     if not target or not spell or spell == "" then return false end
@@ -922,7 +910,7 @@ local function NoteDispelCast(caster, target, spellName)
 
     -- Match the closest buffered fade (may have arrived before the cast line).
     -- Prefer known-harmful fades; also accept same-target pairs so group
-    -- dispels work when we never saw the original affliction line.
+    -- dispels work when the original affliction line was never seen.
     local bestIdx, bestScore = nil, nil
     local i, fade
     for i = 1, table.getn(recentDispelFades) do local fade = recentDispelFades[i]
@@ -986,7 +974,7 @@ local function TryCreditPendingDispel(fadedSpell, target)
         local score = DispelPairScore(cast.time, cast.target, now, target)
         if score then
             -- If the cast named a target and it matches this fade, trust it
-            -- even when we never saw the original "afflicted by" line.
+            -- even when the original "afflicted by" line was never seen.
             local ct = cast.target and NormalizeName(cast.target) or nil
             local ft = target and NormalizeName(target) or nil
             local targetMatched = ct and ft and ct == ft
@@ -2001,7 +1989,7 @@ local function ParseMissMessage(message)
         Parser:AddTakenAvoid(H.getPlayerName(), "Auto Attack", src, "block")
         return true
     end
-    -- "SOURCE's SPELL was dodged/parried/blocked." (OTHERSELF — we are the defender)
+    -- "SOURCE's SPELL was dodged/parried/blocked." (OTHERSELF — local player is the defender)
     _, _, src, spell = string.find(message, "^(.+)'s (.+) was dodged%.?$")
     if src and spell then
         Parser:AddTakenAvoid(H.getPlayerName(), spell, src, "dodge")
@@ -2453,7 +2441,7 @@ local function ParseMessage(event, message)
                         if dtype == "reflect" then
                             absTarget = target -- reflected damage absorbed by the attacker
                         elseif dtype == "reflect_taken" then
-                            absTarget = target or H.getPlayerName() -- we absorbed their reflection
+                            absTarget = target or H.getPlayerName() -- local player absorbed their reflection
                         elseif dtype == "taken" then
                             absTarget = target or H.getPlayerName()
                         elseif dtype == "damage" then
@@ -2582,7 +2570,7 @@ end
 -- H already assigned Parse* inside body; re-point shared H
 if NS.H then
     local i
-    -- copy parse-related H fields if we set them on local H
+    -- copy parse-related H fields set on local H
 end
 H = NS.H or H
 NS.H = H

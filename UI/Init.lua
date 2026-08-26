@@ -567,7 +567,7 @@ local function GetColumnSetting(mode, key)
     if def and def[key] ~= nil then
         return def[key] and true or false
     end
-    -- Unknown key: treat as visible so we never accidentally hide data
+    -- Unknown key: treat as visible so data is not hidden
     return true
 end
 

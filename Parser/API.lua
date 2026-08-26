@@ -41,7 +41,7 @@ local MAX_DEATHS_LIST = 40
 ST.fightEnemies = {}        -- [name] = damage dealt to them by group
 ST.fightEnemyDeaths = {}    -- [name] = how many times this name died this fight
 ST.fightDuplicateNames = {} -- [name] = true if name is not unique (pack trash)
-ST.fightEnemyBossLike = {}  -- [name] = true if UnitLooksLikeBoss while we hit them
+ST.fightEnemyBossLike = {}  -- [name] = true if UnitLooksLikeBoss while hitting them
 ST.fightIsBoss = false
 ST.fightBossName = nil
 
@@ -53,7 +53,7 @@ ST.playerName = nil
 local playerName = nil -- mirrored; prefer ST.playerName in new code
 
 -- Optional mode gates (Advanced Customization "Enabled" checkboxes).
--- When a mode is disabled we skip storing its metrics to save CPU/memory.
+-- Disabled modes skip storing metrics to save CPU/memory.
 local function ModeEnabled(mode)
     local UI = GreedMeter and GreedMeter.UI
     if UI and UI.IsModeEnabled then
@@ -521,7 +521,7 @@ end
 local function MarkDuplicateName(name)
     if not name then return end
     ST.fightDuplicateNames[name] = true
-    -- If we had flagged this name as the boss, clear it
+    -- Clear boss flag for this name if set
     if ST.fightBossName == name then
         ST.fightIsBoss = false
         ST.fightBossName = nil
@@ -1213,7 +1213,7 @@ end
 function Parser:AddMiss(source, spell, target, avoidType)
     EnsureInCombat()
     -- avoidType: "miss" (default), "dodge", "parry", "block"
-    -- Outbound avoids (our swing/spell was avoided by the target).
+    -- Outbound avoids (swing/spell avoided by the target).
     if not ModeEnabled("damage") then return end
     local me = ST.playerName or UnitName("player")
     if source == "You" or source == "you" or source == nil or source == "" then
@@ -1336,7 +1336,7 @@ function Parser:AddDamageTaken(target, amount, source, spell, hitType, partialFl
     target = NormalizeName(target)
     amount = tonumber(amount) or 0
     if not target or amount <= 0 then return end
-    if not OM.players[target] then return end -- only track damage taken by our group
+    if not OM.players[target] then return end -- only track damage taken by the group
 
     source = NormalizeName(source) or "Unknown"
     spell = spell or "Auto Attack"
@@ -1361,7 +1361,7 @@ function Parser:AddDamageTaken(target, amount, source, spell, hitType, partialFl
     end
 end
 
--- Incoming avoid (enemy missed / we dodged-parried-blocked): no damage amount
+-- Incoming avoid (enemy missed / dodge-parry-block): no damage amount
 function Parser:AddTakenAvoid(target, spell, source, avoidType)
     EnsureInCombat()
     if not ModeEnabled("taken") then return end
@@ -1386,7 +1386,7 @@ function Parser:AddDispel(source, what, target)
     if not ModeEnabled("dispels") then return end
     source = ResolveSource(source)
     if not source then return end
-    -- Prefer group members; still allow if we somehow see it
+    -- Prefer group members
     if not IsTracked(source) and not OM.players[source] then return end
     what = what or "Unknown"
     target = NormalizeName(target)
@@ -1427,7 +1427,7 @@ end
 -- ============================================================
 -- CC tracking (enemy-centric) + breakable CC breaks (player-centric)
 -- Combat log usually says "Enemy is afflicted by Sap" with no caster.
--- We list enemies that were CC'd and estimate full duration.
+-- Lists enemies that were CC'd and estimates full duration.
 -- Breakable CCs (Sap/Gouge/Blind/Poly/Frost Trap): first damage to the
 -- target after the CC is applied credits the breaker.
 -- ============================================================
@@ -1476,7 +1476,7 @@ function Parser:AddEnemyCC(spell, target, maxDuration)
     if not ModeEnabled("cc") then return end
     target = NormalizeName(target)
     if not target or target == "" then return end
-    -- Don't track our own group as CC targets in this mode
+    -- Do not track the player's group as CC targets in this mode
     if OM.players and OM.players[target] then return end
     -- Guard against combat-log fragment targets ("on", "with", etc.)
     if string.len(target) < 3 then return end
@@ -1706,7 +1706,7 @@ function Parser:OnCombatEnd(duration)
         O.data.overall.endTime = now
     end
 
-    -- Boss segment = any unique enemy we damaged this fight matched boss criteria
+    -- Boss segment = any unique enemy damaged this fight that matched boss criteria
     if H.ResolveBossFromDamagedEnemies then
         H.ResolveBossFromDamagedEnemies(O.data.current)
     else

@@ -37,14 +37,9 @@ local ShowBarTooltip = UI.ShowBarTooltip
 
 
 -- ============================================================
--- Position clamping (no clamp-during-drag)
---
--- Some modded 1.12 clients (notably 4K + SuperWoW/Nampower) native-crash
--- with ACCESS_VIOLATION #132 when StartMoving() runs on a frame that has
--- SetClampedToScreen(true). Meter frames never use SetClampedToScreen.
---
--- We clamp in Lua after drag, after layout restore, and before saving so
--- positions stay on-screen across resolution/scale changes too.
+-- Position clamping (no clamp-during-drag).
+-- Avoid SetClampedToScreen on meter frames (some 1.12 clients crash on StartMoving).
+-- Clamp in Lua after drag, after layout restore, and before saving.
 -- ============================================================
 
 -- Clamp using real on-screen edges (GetLeft/Right/Top/Bottom).
@@ -1238,7 +1233,7 @@ function UI:RefreshFrame(f)
     end
 
     local showDuration = OM.GetSetting and OM:GetSetting("showFightDuration") == true
-    -- Duration row only when we have a meaningful fight time
+    -- Duration row only when fight time is meaningful
     if showDuration and (not duration or duration <= 0) then
         showDuration = false
     end
@@ -1253,7 +1248,7 @@ function UI:RefreshFrame(f)
     end
     if playerSlots < 0 then playerSlots = 0 end
 
-    -- Scroll: how far we can offset into the player list
+    -- Scroll offset into the player list
     local playerCount = table.getn(playerList)
     local maxScroll = playerCount - playerSlots
     if maxScroll < 0 then maxScroll = 0 end

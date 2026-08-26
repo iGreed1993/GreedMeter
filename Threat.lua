@@ -80,7 +80,7 @@ end
 if OM.defaults.threatView == nil then
     OM.defaults.threatView = "single"
 end
--- Migrate legacy checkbox
+-- Migrate older tank-mode checkbox
 if OM.defaults.enableTankingMode ~= nil then
     if OM.defaults.enableTankingMode and OM.defaults.threatView == "single" then
         OM.defaults.threatView = "tank"
@@ -223,7 +223,7 @@ local function SpellFlatThreat(spell)
     return 0
 end
 
--- Threat-reducing buffs we can detect on the local player (name patterns)
+-- Threat-reducing buffs detectable on the local player (name patterns)
 local THREAT_REDUCE_BUFFS = {
     ["Blessing of Salvation"] = 0.70,
     ["Greater Blessing of Salvation"] = 0.70,
@@ -282,7 +282,7 @@ local function GetLocalPetName()
     return nil
 end
 
--- Unit we treat as the "tank actor" for tank-mode status checks
+-- Unit treated as the tank actor for tank-mode status checks
 local function GetTankActorUnit()
     if PetAsTankEnabled() and UnitExists("pet") then
         return "pet"
@@ -404,7 +404,7 @@ local function GetThreatView()
     if v == "tank" or v == "overall" or v == "all" or v == "single" then
         return v
     end
-    -- Legacy migration from enableTankingMode checkbox
+    -- Migration from enableTankingMode checkbox
     if OM:GetSetting("enableTankingMode") == true then
         return "tank"
     end
@@ -612,7 +612,7 @@ local function GetLocalThreatModifier()
     for bi = 1, 32 do
         local buffTexture = UnitBuff("player", bi)
         if not buffTexture then break end
-        -- We only have texture in 1.12 without SuperWoW tooltip scanning;
+        -- 1.12 without SuperWoW tooltip scanning only exposes texture;
         -- use a conservative approach via tooltip if available.
         -- Many private servers still expose the name via GameTooltip scan.
     end
@@ -688,8 +688,7 @@ local function ParseThreatPacket(packet)
         Threat.currentTargetKey = GetUnitGUID("target")
             or ("name:" .. (Threat.targetName or "?"))
     else
-        -- No local hostile target: retain last key so we keep filling the same
-        -- mob bucket, or use a shared fight key if we have never targeted.
+        -- No local hostile target: keep the last mob key, or a shared fight key.
         if not Threat.currentTargetKey then
             Threat.currentTargetKey = "raid:active"
         end
@@ -992,7 +991,7 @@ local function BuildEstimatedThreat()
         end
     end
 
-    -- Solo with show pets but no segment player row yet: still show pet if we have a name
+    -- Solo with show pets: still show the pet if a name is known
     if ShowPetThreatEnabled() and not IsInGroup() and table.getn(list) == 0 and me then
         local pdata = segment.players[me]
         if pdata then
@@ -1094,13 +1093,13 @@ local function EnemyStatusFromPerc(perc)
     if perc < 100 then
         return "red"      -- you do not have aggro
     end
-    -- You are at (or are) max threat. Without second-place data we treat
+    -- At max threat. Without second-place data treat
     -- a thin margin above 100 as contested when API later supplies it;
     -- for a plain 100% reading mark green (secure lead on the meter).
     return "green"
 end
 
--- When we also know the runner-up ratio (0-1 of your threat), refine yellow
+-- When runner-up ratio (0-1 of your threat) is known, refine yellow
 local function EnemyStatusFromLead(myThreat, secondThreat)
     myThreat = tonumber(myThreat) or 0
     secondThreat = tonumber(secondThreat) or 0
@@ -1432,7 +1431,7 @@ function Threat:BuildEnemyList(hiddenNames)
     for guid, info in pairs(self.tankModeThreats) do
         local mobName = info.creature or info.name or "?"
         -- TMTv1: creature=mob, name=second-highest player, perc=their share
-        -- Our estimation rows use name=mob. Prefer creature when it looks like a mob label.
+        -- Estimation rows use name=mob. Prefer creature when it looks like a mob label.
         if info.creature and info.creature ~= "" then
             mobName = info.creature
         end
@@ -1508,7 +1507,7 @@ function Threat:BuildEnemyList(hiddenNames)
             if not fleeing and UnitExists("target") and UnitName("target") == e.name then
                 fleeing = DetectFleeOnUnit("target", e.name, guid)
             end
-            -- If we have solid aggro again, clear a stale flee flag
+            -- Solid aggro again: clear a stale flee flag
             if d.status == "green" or d.status == "yellow" then
                 ClearEnemyFleeing(e.name, guid)
                 fleeing = false
@@ -1586,10 +1585,8 @@ end
 
 -- Accumulate fight-total threat generated per player (not target-specific)
 -- Rebuild overallThreat from per-target API snapshots when possible.
--- The server API returns every party/raid member's threat on one mob
--- (the current target). It does not return a full player×mob matrix. So we:
---   1) Store each packet under that mob's key (GUID or name)
---   2) Sum each player's threat across all mobs observed this fight
+-- Server API reports party threat on one mob (current target), not a full matrix.
+-- Store each packet under that mob key and sum each player across observed mobs.
 function Threat:UpdateOverallFromPlayerThreats()
     local targetKey = self.currentTargetKey
     if not targetKey then
@@ -1603,7 +1600,7 @@ function Threat:UpdateOverallFromPlayerThreats()
     local anyApi = false
     local name, data
 
-    -- If we have a live target key, snapshot current threats table into that bucket
+    -- Live target key: snapshot current threats table into that bucket
     if targetKey then
         if not self.threatByTarget[targetKey] then
             self.threatByTarget[targetKey] = {}
@@ -1903,7 +1900,7 @@ function Threat:GetSortedList(hiddenNames, mode)
         -- If the live aggro holder changed, force a fresh list even if dataGen is stale
         if aggroName ~= self._lastAggroName then
             self._lastAggroName = aggroName
-            -- don't return cached below — we're already past the cache check with a rebuild
+            -- Skip cached result; list was just rebuilt
         end
 
         list = {}
@@ -2008,7 +2005,7 @@ end
 -- UI hooks
 -- ============================================================
 
--- Format secondary text for a threat entry (used by our own RefreshFrame path)
+-- Format secondary text for a threat entry (RefreshFrame path)
 
 local function FormatThreatSecondary(data)
     if not data then return "0" end
@@ -2329,10 +2326,8 @@ local function UpdateThreatWarnings()
 end
 
 
--- Drive the meter bars for threat mode. Frames.lua captures local copies of
--- BuildSortedList / GetMetric / GetSecondaryText at load time, so replacing
--- UI.BuildSortedList never reaches RefreshFrame. We therefore own the full
--- refresh path when f.mode == "threat".
+-- Drive meter bars for threat mode. Frames.lua captures list builders at load
+-- time, so this owns the full refresh path when f.mode == "threat".
 function Threat:RefreshFrame(f)
     if not f then return end
 
@@ -2649,11 +2644,7 @@ local THREAT_MODE_KEYS = { "threat", "tank", "overall" }
 local function EnsureModeInList(enabled)
     if not UI.MODE_ORDER or not UI.MODE_LABELS then return end
 
-    -- IMPORTANT: mutate the existing table in place.
-    -- UI/Frames.lua keeps a local reference (local MODE_ORDER = UI.MODE_ORDER)
-    -- captured at load time. Replacing UI.MODE_ORDER with a new table would
-    -- leave that local pointing at the old list and the Mode dropdown would
-    -- never show our modes.
+    -- Mutate MODE_ORDER in place. Frames.lua captures the table at load time.
     local i, k
     for i = table.getn(UI.MODE_ORDER), 1, -1 do
         local key = UI.MODE_ORDER[i]
@@ -3379,7 +3370,7 @@ function Threat:OnLoad()
         if OM.db.threatWarnSoundFile == nil then OM.db.threatWarnSoundFile = "raidwarning" end
         if OM.db.petAsTank == nil then OM.db.petAsTank = false end
         if OM.db.threatView == nil then
-            -- migrate legacy tank checkbox
+            -- migrate older tank checkbox
             if OM.db.enableTankingMode then
                 OM.db.threatView = "tank"
             else

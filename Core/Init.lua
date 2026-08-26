@@ -244,7 +244,7 @@ frame:SetScript("OnEvent", function()
     elseif event == "PLAYER_REGEN_DISABLED" then
         OM:StartCombat()
     elseif event == "PLAYER_REGEN_ENABLED" then
-        -- Small delay so we don't end combat on brief drops
+        -- Small delay so combat does not end on brief drops
         -- For now keep it simple; group combat timer can come later
         OM:StopCombat()
     end
