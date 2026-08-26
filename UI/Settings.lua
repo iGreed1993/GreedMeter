@@ -1824,7 +1824,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
 
     local exampleFs = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     exampleFs:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
-    exampleFs:SetText("Example: Interface\\AddOns\\SomeAddon\\media\\statusbar.tga")
+    exampleFs:SetText("Example: C:\\OctoWoW\\Interface\\AddOns\\SomeAddon\\media\\bar.tga")
     exampleFs:SetTextColor(0.65, 0.65, 0.65)
     y = y - 16
 
@@ -1845,7 +1845,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
         if importKind == "bar" then
             kindBar:Disable()
             kindFont:Enable()
-            exampleFs:SetText("Example: Interface\\AddOns\\SomeAddon\\media\\statusbar.tga")
+            exampleFs:SetText("Example: C:\\OctoWoW\\Interface\\AddOns\\SomeAddon\\media\\bar.tga")
         else
             kindBar:Enable()
             kindFont:Disable()
@@ -1874,7 +1874,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     pathBox:SetAutoFocus(false)
     pathBox:SetFontObject(GameFontHighlightSmall)
     pathBox:SetText("")
-    pathBox:SetMaxLetters(200)
+    pathBox:SetMaxLetters(400)
     pathBox:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -1903,11 +1903,45 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
 
     local removeBtns = {}
 
+    -- Accept full OS paths, either slash style, any casing of Interface/Fonts.
+    -- Strips everything before Interface\\ or Fonts\\.
+    -- Also accepts addon-relative paths like: UI-Reforged\\media\\bar.tga
+    --   -> Interface\\AddOns\\UI-Reforged\\media\\bar.tga
     local function NormalizePath(p)
         if not p then return "" end
         p = string.gsub(p, "^%s+", "")
         p = string.gsub(p, "%s+$", "")
+        p = string.gsub(p, "^\"(.*)\"$", "%1")
+        p = string.gsub(p, "^'(.*)'$", "%1")
         p = string.gsub(p, "/", "\\")
+        while string.find(p, "\\\\", 1, true) do
+            p = string.gsub(p, "\\\\", "\\")
+        end
+
+        local lower = string.lower(p)
+        local s = string.find(lower, "interface\\", 1, true)
+        if s then
+            return "Interface" .. string.sub(p, s + 9)
+        end
+        s = string.find(lower, "fonts\\", 1, true)
+        if s then
+            return "Fonts" .. string.sub(p, s + 5)
+        end
+
+        -- "AddOns\\Foo\\bar.tga" (missing Interface\\)
+        s = string.find(lower, "addons\\", 1, true)
+        if s then
+            return "Interface\\AddOns" .. string.sub(p, s + 6)
+        end
+
+        -- Bare addon path: "UI-Reforged\\media\\bar.tga"
+        if string.find(lower, "%.tga") or string.find(lower, "%.blp")
+            or string.find(lower, "%.png") or string.find(lower, "%.ttf")
+            or string.find(lower, "%.otf") then
+            if string.sub(lower, 1, 10) ~= "interface\\" and string.sub(lower, 1, 6) ~= "fonts\\" then
+                return "Interface\\AddOns\\" .. p
+            end
+        end
         return p
     end
 
@@ -1929,28 +1963,12 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     local function RefreshCustomList()
         local bars = OM:GetSetting("customBarStyles") or {}
         local fonts = OM:GetSetting("customBarFonts") or {}
-        local lines = {}
-        local i
-        if table.getn(bars) > 0 then
-            table.insert(lines, "Bars:")
-            for i = 1, table.getn(bars) do
-                table.insert(lines, "  " .. (bars[i].label or bars[i].key) .. "  |  " .. (bars[i].texture or ""))
-            end
-        end
-        if table.getn(fonts) > 0 then
-            table.insert(lines, "Fonts:")
-            for i = 1, table.getn(fonts) do
-                table.insert(lines, "  " .. (fonts[i].label or fonts[i].key) .. "  |  " .. (fonts[i].path or ""))
-            end
-        end
-        if table.getn(lines) == 0 then
+        local nBars = type(bars) == "table" and table.getn(bars) or 0
+        local nFonts = type(fonts) == "table" and table.getn(fonts) or 0
+        if nBars == 0 and nFonts == 0 then
             customListFS:SetText("|cff888888No custom bars/fonts imported yet.|r")
         else
-            local text = lines[1] or ""
-            for i = 2, table.getn(lines) do
-                text = text .. "\n" .. lines[i]
-            end
-            customListFS:SetText(text)
+            customListFS:SetText("|cffaaaaaaCheck Bar style / Bar font dropdowns for imported entries.|r")
         end
 
         -- Rebuild dropdown option tables in place so closures see updates
@@ -1980,21 +1998,22 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Enter a file path first.")
             return
         end
-        if not string.find(path, "Interface\\") and not string.find(path, "Fonts\\") then
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Path should start with Interface\\ or Fonts\\")
+        local pl = string.lower(path)
+        if string.sub(pl, 1, 10) ~= "interface\\" and string.sub(pl, 1, 6) ~= "fonts\\" then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Path must include Interface\\ or Fonts\\ (full paths like C:\\OctoWoW\\Interface\\... are OK — the prefix is stripped automatically).")
             return
         end
 
-        -- Prefer explicit button choice, but always trust file extension when clear
-        local kind = content.importKind or "bar"
+        -- Prefer explicit Bar/Font button; file extension overrides when obvious
+        local kind = importKind or "bar"
         local lower = string.lower(path)
         if string.find(lower, "%.ttf") or string.find(lower, "%.otf") then
             kind = "font"
-            content.importKind = "font"
+            importKind = "font"
             UpdateKindButtons()
         elseif string.find(lower, "%.tga") or string.find(lower, "%.blp") or string.find(lower, "%.png") then
             kind = "bar"
-            content.importKind = "bar"
+            importKind = "bar"
             UpdateKindButtons()
         end
 
@@ -2012,7 +2031,8 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
             end
             table.insert(list, { key = key, label = label, path = path })
             OM:SetSetting("customBarFonts", list)
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Imported font: " .. label)
+            OM:SetSetting("barFont", key)
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Imported font: " .. label .. " (selected)")
         else
             local list = OM:GetSetting("customBarStyles")
             if type(list) ~= "table" then list = {} end
@@ -2026,7 +2046,8 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
             end
             table.insert(list, { key = key, label = label, texture = path })
             OM:SetSetting("customBarStyles", list)
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Imported bar style: " .. label)
+            OM:SetSetting("barStyle", key)
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Imported bar style: " .. label .. " (selected)")
         end
         pathBox:SetText("")
         pathBox:ClearFocus()

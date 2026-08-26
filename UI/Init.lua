@@ -227,7 +227,15 @@ function UI.GetMergedBarStyles()
     for i = 1, table.getn(custom) do
         local e = custom[i]
         if e and e.key and e.texture and not PathLooksLikeFont(e.texture) then
-            table.insert(list, e)
+            local lab = e.label or e.key or "Custom"
+            if not string.find(lab, "(Imported)", 1, true) then
+                lab = lab .. " (Imported)"
+            end
+            table.insert(list, {
+                key = e.key,
+                label = lab,
+                texture = e.texture,
+            })
         end
     end
     return list
@@ -244,7 +252,15 @@ function UI.GetMergedBarFonts()
     for i = 1, table.getn(custom) do
         local e = custom[i]
         if e and e.key and e.path then
-            table.insert(list, e)
+            local lab = e.label or e.key or "Custom"
+            if not string.find(lab, "(Imported)", 1, true) then
+                lab = lab .. " (Imported)"
+            end
+            table.insert(list, {
+                key = e.key,
+                label = lab,
+                path = e.path,
+            })
         end
     end
     return list
