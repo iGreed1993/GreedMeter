@@ -321,32 +321,14 @@ function UI:CreateSettingsFrame()
             DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Layout is now per-character.")
         end
     end
-    y = y - 26
-    local resetPosBtn = CreateButton(pageGeneral, "Reset Window Positions", 160, 20, function()
-        if UI.ResetFramePositions then
-            UI:ResetFramePositions()
-            DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Window positions restored to center.")
-        end
-    end)
-    resetPosBtn:ClearAllPoints()
-    resetPosBtn:SetPoint("TOPLEFT", pageGeneral, "TOPLEFT", 16, y)
-    if resetPosBtn.SetScript then
-        -- tooltip
-        resetPosBtn:SetScript("OnEnter", function()
-            GameTooltip:SetOwner(resetPosBtn, "ANCHOR_RIGHT")
-            GameTooltip:SetText("Reset Window Positions", 1, 1, 1)
-            GameTooltip:AddLine("Moves all meter windows back to the center of the screen", 0.8, 0.8, 0.8, 1)
-            GameTooltip:AddLine("(cascaded slightly so multiple windows stay visible).", 0.8, 0.8, 0.8, 1)
-            GameTooltip:AddLine("Also recenters the settings window.", 0.8, 0.8, 0.8, 1)
-            GameTooltip:Show()
-        end)
-        resetPosBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    end
-    y = y - 26
+    y = y - 24
     AddCheckbox(pageGeneral, "Confirm before reset", 16, y, "confirmReset", "Show a confirmation popup when pressing Reset")
     y = y - 24
-    AddCheckbox(pageGeneral, "Party Reset", 16, y, "partyReset",
-        "Attempts to reset after joining/leaving a party or raid. Follows confirm settings")
+    AddCheckbox(pageGeneral, "Party Join Reset", 16, y, "partyJoinReset",
+        "Reset meter data after joining a party or raid. Follows Confirm before reset.")
+    y = y - 24
+    AddCheckbox(pageGeneral, "Party Leave Reset", 16, y, "partyLeaveReset",
+        "Reset meter data after leaving a party or raid. Follows Confirm before reset.")
     y = y - 24
     AddCheckbox(pageGeneral, "Confirm before announce", 16, y, "confirmAnnounce", "Show a confirmation popup when pressing Announce")
     y = y - 24
@@ -1689,11 +1671,28 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     y = y - 22
 
     MakeSettingCheckbox(pageDisplay, "Class colors", 4, y, "classColors", "Color bars by player class")
-    MakeSettingCheckbox(pageDisplay, "Mode Colors", 150, y, "buttonsColorWithMode",
+    MakeSettingCheckbox(pageDisplay, "Mode Colors", 118, y, "buttonsColorWithMode",
         "Tint header buttons and Total bar with each mode's color")
-    MakeSettingCheckbox(pageDisplay, "Class icons", 300, y, "showClassIcons",
+    local classIconCb = MakeSettingCheckbox(pageDisplay, "Class icons", 228, y, "showClassIcons",
         "Show a class icon before each player name on the bars")
     y = y - 22
+
+    local circularCb = MakeSettingCheckbox(pageDisplay, "Circular icons", 248, y, "circularClassIcons",
+        "Draw class icons with a circular ring (same method as the minimap button).", 18)
+    local function SyncCircularEnabled()
+        local parentOn = OM:GetSetting("showClassIcons") == true
+        if parentOn then
+            circularCb:Enable()
+            if circularCb.label then circularCb.label:SetTextColor(1, 1, 1) end
+        else
+            circularCb:Disable()
+            if circularCb.label then circularCb.label:SetTextColor(0.5, 0.5, 0.5) end
+        end
+    end
+    classIconCb.onToggle = function()
+        SyncCircularEnabled()
+    end
+    SyncCircularEnabled()
 
     local compactCb = MakeSettingCheckbox(pageDisplay, "Compact Header", 4, y, "hideTitle",
         "One-line header with abbreviated button labels (Re, An, Na, Mo, ...)")
@@ -1718,9 +1717,9 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
         return b
     end
     -- Sit to the right of "Keep Title in compact" on the same row
-    local alignLeft = MakeAlignBtn("Left", "LEFT", 280)
-    local alignCenter = MakeAlignBtn("Center", "CENTER", 332)
-    local alignRight = MakeAlignBtn("Right", "RIGHT", 384)
+    local alignLeft = MakeAlignBtn("Left", "LEFT", 188)
+    local alignCenter = MakeAlignBtn("Center", "CENTER", 238)
+    local alignRight = MakeAlignBtn("Right", "RIGHT", 288)
     f.alignBtns = { alignLeft, alignCenter, alignRight }
 
     local function SyncAlignButtons()
@@ -1788,6 +1787,35 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
         end
     end
     y = y - 24
+
+    -- Right column: hide individual header buttons
+    local hideX = 400
+    local hy = 0
+    local hideHdr = pageDisplay:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    hideHdr:SetPoint("TOPLEFT", pageDisplay, "TOPLEFT", hideX, hy)
+    hideHdr:SetText("Hide buttons")
+    hideHdr:SetTextColor(1, 0.85, 0.4)
+    hy = hy - 20
+    MakeSettingCheckbox(pageDisplay, "Reset", hideX, hy, "hideHeaderReset",
+        "Hide the Reset button on meter windows.")
+    hy = hy - 20
+    MakeSettingCheckbox(pageDisplay, "Announce", hideX, hy, "hideHeaderAnnounce",
+        "Hide the Announce button on meter windows.")
+    hy = hy - 20
+    MakeSettingCheckbox(pageDisplay, "Name", hideX, hy, "hideHeaderName",
+        "Hide the Name filter button on meter windows.")
+    hy = hy - 20
+    MakeSettingCheckbox(pageDisplay, "Segment", hideX, hy, "hideHeaderSegment",
+        "Hide the Segment button on meter windows.")
+    hy = hy - 20
+    MakeSettingCheckbox(pageDisplay, "Mode", hideX, hy, "hideHeaderMode",
+        "Hide the Mode button on meter windows.")
+    hy = hy - 20
+    MakeSettingCheckbox(pageDisplay, "+ / - windows", hideX, hy, "hideHeaderWindows",
+        "Hide the add/remove window buttons on meter windows.")
+    hy = hy - 8
+    if hy < y then y = hy end
+
     if f.tabHeights then
         f.tabHeights.display = math.max(100, (-y) + 16)
     end
@@ -2288,6 +2316,22 @@ local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTempla
         OM:SetSetting("abbreviateNames", false)
         if f.abvCb then f.abvCb:SetChecked(nil) end
 
+        -- Restore scalar defaults and window positions
+        local hideKeys = {
+            "hideHeaderReset", "hideHeaderAnnounce", "hideHeaderName",
+            "hideHeaderSegment", "hideHeaderMode", "hideHeaderWindows",
+            "partyJoinReset", "partyLeaveReset",
+        }
+        local hk
+        for hk = 1, table.getn(hideKeys) do
+            local key = hideKeys[hk]
+            local def = OM.defaults and OM.defaults[key]
+            OM:SetSetting(key, def and true or false)
+        end
+        if UI.ResetFramePositions then
+            UI:ResetFramePositions()
+        end
+
         local r
         for r = 1, table.getn(f.modeRows) do
             local row = f.modeRows[r]
@@ -2325,7 +2369,7 @@ local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTempla
         ApplyModeEnabledToFrames()
         if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
         if UI.Refresh then UI:Refresh() end
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Customization settings reset to defaults.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Settings reset to defaults. Windows centered.")
     end)
     if reset then
         reset:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)

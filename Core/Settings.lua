@@ -9,6 +9,7 @@ local OM = GreedMeter
 OM.defaults = {
     classColors = true,
     showClassIcons = false,
+    circularClassIcons = false, -- round class icons (minimap-style ring)
     buttonsColorWithMode = false, -- tint header buttons with the window's mode color
     barStyle = "Default",   -- status bar texture style
     barFont = "Friz",       -- bar text font
@@ -23,6 +24,12 @@ OM.defaults = {
     compactTitleAlign = "CENTER", -- LEFT / CENTER / RIGHT when keep title is on
     hideBarBackgrounds = false, -- hide dark empty track behind bar fill
     hideOutOfCombat = false, -- fade-hide meter windows shortly after combat ends
+    hideHeaderReset = false,
+    hideHeaderAnnounce = false,
+    hideHeaderName = false,
+    hideHeaderSegment = false,
+    hideHeaderMode = false,
+    hideHeaderWindows = false, -- hide + / - window buttons
     mergePetDamage = false, -- tooltip only: one "Pet: Damage" line vs per-ability; pets always merge to owner on meter
     announceChannel = "AUTO",
     announceLines = 5,
@@ -33,7 +40,8 @@ OM.defaults = {
     combatLogRangeSetting = 200,
     frameOpacity = 100,
     confirmReset = false,
-    partyReset = false, -- auto-reset on join/leave party or party→raid
+    partyJoinReset = false, -- reset when joining a party or raid
+    partyLeaveReset = false, -- reset when leaving a party or raid
     -- Test toggles: allow forcing backends off while the client mods stay installed
     useSuperWoW = true,  -- when false, skip SuperWoW RAW + GUID helpers even if present
     confirmAnnounce = false,
@@ -64,6 +72,16 @@ function OM:InitDB()
         if GreedMeterDB[k] == nil then
             GreedMeterDB[k] = v
         end
+    end
+    -- Split older combined partyReset into join/leave
+    if GreedMeterDB.partyReset ~= nil then
+        if GreedMeterDB.partyJoinReset == nil then
+            GreedMeterDB.partyJoinReset = GreedMeterDB.partyReset and true or false
+        end
+        if GreedMeterDB.partyLeaveReset == nil then
+            GreedMeterDB.partyLeaveReset = GreedMeterDB.partyReset and true or false
+        end
+        GreedMeterDB.partyReset = nil
     end
     -- Migrate old account-wide size keys out of the way
     GreedMeterDB.frameWidth = nil

@@ -111,9 +111,16 @@ local function CurrentGroupType()
     return "solo"
 end
 
--- Auto-reset when joining/leaving a party or converting party→raid (not every member change).
+-- Auto-reset on group join and/or leave, depending on settings.
 function OM:MaybePartyReset()
-    if not self.GetSetting or not self:GetSetting("partyReset") then
+    local joinOn = self.GetSetting and self:GetSetting("partyJoinReset") == true
+    local leaveOn = self.GetSetting and self:GetSetting("partyLeaveReset") == true
+    -- Older combined setting
+    if self.GetSetting and self:GetSetting("partyReset") == true then
+        joinOn = true
+        leaveOn = true
+    end
+    if not joinOn and not leaveOn then
         self._partyResetGroupType = CurrentGroupType()
         return
     end
@@ -129,12 +136,11 @@ function OM:MaybePartyReset()
         return
     end
 
-    -- Meaningful transitions only
-    local shouldReset =
-        (oldType == "solo" and (newType == "party" or newType == "raid"))
-        or (newType == "solo" and (oldType == "party" or oldType == "raid"))
+    local isJoin = (oldType == "solo" and (newType == "party" or newType == "raid"))
         or (oldType == "party" and newType == "raid")
+    local isLeave = (newType == "solo" and (oldType == "party" or oldType == "raid"))
         or (oldType == "raid" and newType == "party")
+    local shouldReset = (isJoin and joinOn) or (isLeave and leaveOn)
     if not shouldReset then
         return
     end
@@ -145,7 +151,7 @@ function OM:MaybePartyReset()
         else
             OM:Fire("OnReset")
         end
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Party Reset — data cleared.")
+        DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Group change reset — data cleared.")
     end
 
     if self:GetSetting("confirmReset") then

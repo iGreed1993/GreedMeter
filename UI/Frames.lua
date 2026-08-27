@@ -251,20 +251,26 @@ local function FitHeaderBtn(btn, label)
     if not w or w < 1 then
         w = string.len(text) * 6
     end
-    local width = w + 10
-    if width < 28 then width = 28 end
-    if width > 120 then width = 120 end
+    local width = w + 8
+    if width < 16 then width = 16 end
+    if width > 140 then width = 140 end
     btn:SetWidth(width)
 end
 
--- First two letters of the first word (for compact header labels)
-local function TwoLetter(text)
-    if not text or text == "" then return "" end
-    local word = text
-    local _, _, w = string.find(text, "^(%S+)")
-    if w then word = w end
-    if string.len(word) <= 2 then return word end
-    return string.sub(word, 1, 2)
+local function CompactSegmentLabel(key)
+    key = key or "current"
+    if key == "current" then return "C" end
+    if key == "overall" then return "O" end
+    if key == "paused" then return "P" end
+    local _, _, n = string.find(key, "^recent(%d+)$")
+    if n then return "S" .. n end
+    local _, _, n2 = string.find(key, "^boss(%d+)$")
+    if n2 then return "B" .. n2 end
+    return "S"
+end
+
+local function HeaderBtnHidden(key)
+    return OM.GetSetting and OM:GetSetting(key) == true
 end
 
 local function IsCompactHeader()
@@ -367,35 +373,46 @@ end
 local function ApplyHeaderButtonLabels(f)
     if not f then return end
     local compact = IsCompactHeader()
-    local keepTitle = compact and KeepTitleInCompact()
 
     if f.resetLabel then
-        f.resetLabel:SetText(compact and "Re" or "Reset")
+        f.resetLabel:SetText(compact and "R" or "Reset")
     end
     if f.announceLabel then
-        f.announceLabel:SetText(compact and "An" or "Announce")
+        f.announceLabel:SetText(compact and "!" or "Announce")
     end
     if f.nameLabel then
-        f.nameLabel:SetText(compact and "Na" or "Name")
+        f.nameLabel:SetText(compact and "N" or "Name")
     end
     if f.modeLabel then
-        if compact and not keepTitle then
+        if compact then
             local mode = f.mode or "damage"
-            f.modeLabel:SetText(MODE_COMPACT[mode] or TwoLetter(MODE_LABELS[mode] or mode))
+            f.modeLabel:SetText((MODE_LABELS and MODE_LABELS[mode]) or mode)
         else
-            -- Normal header, or compact with title kept: always "Mode"
             f.modeLabel:SetText("Mode")
         end
     end
     if f.segLabel then
-        local full = UI:SegmentLabel(f.segment)
         if compact then
-            f.segLabel:SetText(TwoLetter(full))
+            f.segLabel:SetText(CompactSegmentLabel(f.segment))
         else
-            f.segLabel:SetText(full)
+            f.segLabel:SetText(UI:SegmentLabel(f.segment))
         end
     end
-    -- + / - stay as-is
+end
+
+local function ApplyHeaderButtonVisibility(f)
+    if not f then return end
+    local function vis(btn, hidden)
+        if not btn then return end
+        if hidden then btn:Hide() else btn:Show() end
+    end
+    vis(f.resetBtn, HeaderBtnHidden("hideHeaderReset"))
+    vis(f.announceBtn, HeaderBtnHidden("hideHeaderAnnounce"))
+    vis(f.nameBtn, HeaderBtnHidden("hideHeaderName"))
+    vis(f.segBtn, HeaderBtnHidden("hideHeaderSegment"))
+    vis(f.modeBtn, HeaderBtnHidden("hideHeaderMode"))
+    vis(f.addBtn, HeaderBtnHidden("hideHeaderWindows"))
+    vis(f.removeBtn, HeaderBtnHidden("hideHeaderWindows"))
 end
 
 local function FitAllHeaderBtns(f)
@@ -407,6 +424,74 @@ local function FitAllHeaderBtns(f)
     FitHeaderBtn(f.announceBtn, f.announceLabel)
     FitHeaderBtn(f.addBtn, f.addLabel)
     FitHeaderBtn(f.removeBtn, f.removeLabel)
+
+    -- Only compact (single-row) headers shrink to avoid overlap.
+    -- Normal two-row header keeps full labels (Mode stays "Mode").
+    if not IsCompactHeader() then
+        return
+    end
+
+    -- Shrink buttons to fit the frame width without overlapping
+    local shown = {}
+    local function add(btn)
+        if btn and btn:IsShown() then
+            table.insert(shown, btn)
+        end
+    end
+    add(f.resetBtn)
+    add(f.announceBtn)
+    add(f.addBtn)
+    add(f.removeBtn)
+    add(f.nameBtn)
+    add(f.segBtn)
+    add(f.modeBtn)
+    local n = table.getn(shown)
+    if n == 0 then return end
+    local gap = 3
+    local pad = 8
+    local total = pad
+    local i
+    for i = 1, n do
+        total = total + (shown[i]:GetWidth() or 20)
+        if i < n then total = total + gap end
+    end
+    local avail = f:GetWidth() or 240
+    if total <= avail then return end
+    local overflow = total - avail
+    -- Shrink mode button first
+    if f.modeBtn and f.modeBtn:IsShown() then
+        local w = f.modeBtn:GetWidth() or 40
+        local cut = overflow
+        if cut > (w - 24) then cut = w - 24 end
+        if cut < 0 then cut = 0 end
+        f.modeBtn:SetWidth(w - cut)
+        overflow = overflow - cut
+        if f.modeLabel then
+            f.modeLabel:SetWidth((w - cut) - 4)
+            if f.modeLabel.SetNonSpaceWrap then
+                f.modeLabel:SetNonSpaceWrap(nil)
+            end
+        end
+    end
+    if overflow <= 0 then return end
+    -- Then shrink remaining buttons evenly down to a floor
+    local others = 0
+    for i = 1, n do
+        if shown[i] ~= f.modeBtn then
+            others = others + 1
+        end
+    end
+    if others < 1 then return end
+    local each = overflow / others
+    for i = 1, n do
+        local btn = shown[i]
+        if btn ~= f.modeBtn then
+            local w = btn:GetWidth() or 20
+            local nw = w - each
+            if nw < 14 then nw = 14 end
+            btn:SetWidth(nw)
+        end
+    end
 end
 
 function UI:CreateMeterFrame(isPrimary, copyFrom)
@@ -541,6 +626,10 @@ local f = CreateFrame("Frame", name, UIParent)
         if newH > MAX_FRAME_HEIGHT then newH = MAX_FRAME_HEIGHT end
         f:SetWidth(newW)
         f:SetHeight(newH)
+        if UI.ApplyHeaderLayout then
+            local ht = OM.GetSetting and OM:GetSetting("hideTitle") == true
+            UI:ApplyHeaderLayout(f, ht, 0)
+        end
         UI:LayoutBars(f)
         UI:RefreshFrame(f)
     end)
@@ -738,13 +827,24 @@ local f = CreateFrame("Frame", name, UIParent)
             bg:Hide()
         end
 
-        -- Optional class icon (size tracks bar height)
-        local classIcon = bar:CreateTexture(nil, "OVERLAY")
-        classIcon:SetWidth(barH)
-        classIcon:SetHeight(barH)
-        classIcon:SetPoint("LEFT", bar, "LEFT", 0, 0)
+        -- Optional class icon. Holder matches the minimap button layout:
+        -- 32px button, 20px icon centered, 53px tracking border at TOPLEFT.
+        local classHolder = CreateFrame("Frame", nil, bar)
+        classHolder:SetWidth(barH)
+        classHolder:SetHeight(barH)
+        classHolder:SetPoint("LEFT", bar, "LEFT", 1, 0)
+        classHolder:Hide()
+        bar.classIconHolder = classHolder
+
+        local classIcon = classHolder:CreateTexture(nil, "ARTWORK")
+        classIcon:SetAllPoints(classHolder)
         classIcon:Hide()
         bar.classIcon = classIcon
+
+        local classRing = classHolder:CreateTexture(nil, "OVERLAY")
+        classRing:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+        classRing:Hide()
+        bar.classIconRing = classRing
 
         local nameText = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
@@ -920,22 +1020,82 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
     local keepTitle = compact and KeepTitleInCompact()
     local COMPACT_ROW = 20
     local TITLE_ROW = 18
-    local headerH
-    if compact then
-        if keepTitle then
-            headerH = TITLE_ROW + COMPACT_ROW
-        else
-            headerH = COMPACT_ROW
-        end
-    else
-        headerH = HEADER_HEIGHT
-    end
 
     if f.durationLabel then
         f.durationLabel:Hide()
     end
 
     ApplyHeaderButtonLabels(f)
+    ApplyHeaderButtonVisibility(f)
+    -- Size buttons to their labels before deciding one-row vs two-row
+    FitHeaderBtn(f.nameBtn, f.nameLabel)
+    FitHeaderBtn(f.modeBtn, f.modeLabel)
+    FitHeaderBtn(f.segBtn, f.segLabel)
+    FitHeaderBtn(f.resetBtn, f.resetLabel)
+    FitHeaderBtn(f.announceBtn, f.announceLabel)
+    FitHeaderBtn(f.addBtn, f.addLabel)
+    FitHeaderBtn(f.removeBtn, f.removeLabel)
+
+    local function BtnShown(btn)
+        return btn and btn:IsShown()
+    end
+    local function BtnW(btn)
+        if not BtnShown(btn) then return 0 end
+        return btn:GetWidth() or 0
+    end
+    local anyBtn = BtnShown(f.resetBtn) or BtnShown(f.announceBtn) or BtnShown(f.nameBtn)
+        or BtnShown(f.segBtn) or BtnShown(f.modeBtn) or BtnShown(f.addBtn) or BtnShown(f.removeBtn)
+
+    local leftW = 0
+    local gap = 3
+    local function AddLeft(btn)
+        if not BtnShown(btn) then return end
+        if leftW > 0 then leftW = leftW + gap end
+        leftW = leftW + BtnW(btn)
+    end
+    AddLeft(f.resetBtn)
+    AddLeft(f.announceBtn)
+    AddLeft(f.addBtn)
+    AddLeft(f.removeBtn)
+    AddLeft(f.nameBtn)
+    local rightW = 0
+    local function AddRight(btn)
+        if not BtnShown(btn) then return end
+        if rightW > 0 then rightW = rightW + gap end
+        rightW = rightW + BtnW(btn)
+    end
+    AddRight(f.modeBtn)
+    AddRight(f.segBtn)
+
+    local titleW = 0
+    if f.title and f.title.GetStringWidth then
+        titleW = f.title:GetStringWidth() or 0
+    end
+    if titleW < 40 then titleW = 40 end
+    local frameW = f:GetWidth() or 240
+    local oneRowNeed = 8 + leftW + 12 + titleW + 12 + rightW + 8
+    -- Collapse the normal two-row header when leftover buttons + title fit on one line,
+    -- or when every button is hidden.
+    local autoOneRow = (not compact) and ((not anyBtn) or (oneRowNeed <= frameW))
+
+    local headerH
+    if compact then
+        if not anyBtn and not keepTitle then
+            headerH = 6
+        elseif keepTitle then
+            headerH = TITLE_ROW + COMPACT_ROW
+        else
+            headerH = COMPACT_ROW
+        end
+    elseif autoOneRow then
+        if not anyBtn then
+            headerH = TITLE_ROW
+        else
+            headerH = COMPACT_ROW
+        end
+    else
+        headerH = HEADER_HEIGHT
+    end
 
     if f.title then
         local mode = f.mode or "damage"
@@ -969,68 +1129,97 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
             f.title:Show()
         end
 
-        -- Left cluster: Re  An  +  Na
-        if f.resetBtn then
-            f.resetBtn:ClearAllPoints()
-            f.resetBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, rowY)
-            f.resetBtn:Show()
-        end
-        if f.announceBtn then
-            f.announceBtn:ClearAllPoints()
-            f.announceBtn:SetPoint("LEFT", f.resetBtn, "RIGHT", 3, 0)
-            f.announceBtn:Show()
-        end
-        local midBtn = f.addBtn or f.removeBtn
-        if midBtn then
-            midBtn:ClearAllPoints()
-            if f.announceBtn then
-                midBtn:SetPoint("LEFT", f.announceBtn, "RIGHT", 3, 0)
+        -- Left cluster: Reset, Announce, +/-, Name (skip hidden)
+        local leftPrev = nil
+        local function PlaceLeft(btn)
+            if not btn or not btn:IsShown() then return end
+            btn:ClearAllPoints()
+            if leftPrev then
+                btn:SetPoint("LEFT", leftPrev, "RIGHT", 3, 0)
             else
-                midBtn:SetPoint("LEFT", f.resetBtn, "RIGHT", 3, 0)
+                btn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, rowY)
             end
-            midBtn:Show()
+            leftPrev = btn
         end
-        if f.nameBtn then
-            f.nameBtn:ClearAllPoints()
-            if midBtn then
-                f.nameBtn:SetPoint("LEFT", midBtn, "RIGHT", 3, 0)
-            else
-                f.nameBtn:SetPoint("LEFT", f.announceBtn or f.resetBtn, "RIGHT", 3, 0)
-            end
-            if f.nameLabel then f.nameLabel:SetJustifyH("CENTER") end
-        end
+        PlaceLeft(f.resetBtn)
+        PlaceLeft(f.announceBtn)
+        PlaceLeft(f.addBtn)
+        PlaceLeft(f.removeBtn)
+        PlaceLeft(f.nameBtn)
 
-        -- Right cluster: Se  Mo
-        if f.modeBtn then
-            f.modeBtn:ClearAllPoints()
-            f.modeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, rowY)
-            if f.modeLabel then f.modeLabel:SetJustifyH("CENTER") end
+        -- Right cluster: Segment then Mode (skip hidden)
+        local rightPrev = nil
+        local function PlaceRight(btn)
+            if not btn or not btn:IsShown() then return end
+            btn:ClearAllPoints()
+            if rightPrev then
+                btn:SetPoint("RIGHT", rightPrev, "LEFT", -3, 0)
+            else
+                btn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, rowY)
+            end
+            rightPrev = btn
         end
-        if f.segBtn then
-            f.segBtn:ClearAllPoints()
-            f.segBtn:SetPoint("RIGHT", f.modeBtn, "LEFT", -3, 0)
-            if f.segLabel then f.segLabel:SetJustifyH("CENTER") end
+        PlaceRight(f.modeBtn)
+        PlaceRight(f.segBtn)
+    elseif autoOneRow then
+        -- One row: leftover buttons + title, or title only
+        local rowY = -2
+        local leftPrev = nil
+        local function PlaceLeft(btn)
+            if not btn or not btn:IsShown() then return end
+            btn:ClearAllPoints()
+            if leftPrev then
+                btn:SetPoint("LEFT", leftPrev, "RIGHT", 3, 0)
+            else
+                btn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, rowY)
+            end
+            leftPrev = btn
+        end
+        PlaceLeft(f.resetBtn)
+        PlaceLeft(f.announceBtn)
+        PlaceLeft(f.addBtn)
+        PlaceLeft(f.removeBtn)
+        PlaceLeft(f.nameBtn)
+
+        local rightPrev = nil
+        local function PlaceRight(btn)
+            if not btn or not btn:IsShown() then return end
+            btn:ClearAllPoints()
+            if rightPrev then
+                btn:SetPoint("RIGHT", rightPrev, "LEFT", -3, 0)
+            else
+                btn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, rowY)
+            end
+            rightPrev = btn
+        end
+        PlaceRight(f.modeBtn)
+        PlaceRight(f.segBtn)
+
+        if f.title then
+            f.title:ClearAllPoints()
+            f.title:SetPoint("TOP", f, "TOP", 0, -2)
+            f.title:SetJustifyH("CENTER")
+            f.title:Show()
         end
     else
         -- Default two-row header
         -- Row 1: Reset | Title | Segment
         -- Row 2: Name | Announce | + | Mode
-        if f.resetBtn then
+        if f.resetBtn and f.resetBtn:IsShown() then
             f.resetBtn:ClearAllPoints()
             f.resetBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -3)
-            f.resetBtn:Show()
         end
-        if f.segBtn then
+        if f.segBtn and f.segBtn:IsShown() then
             f.segBtn:ClearAllPoints()
             f.segBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -3)
             if f.segLabel then f.segLabel:SetJustifyH("CENTER") end
         end
-        if f.nameBtn then
+        if f.nameBtn and f.nameBtn:IsShown() then
             f.nameBtn:ClearAllPoints()
             f.nameBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -18)
             if f.nameLabel then f.nameLabel:SetJustifyH("CENTER") end
         end
-        if f.modeBtn then
+        if f.modeBtn and f.modeBtn:IsShown() then
             f.modeBtn:ClearAllPoints()
             f.modeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -18)
             if f.modeLabel then
@@ -1043,20 +1232,27 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
             f.title:SetPoint("TOP", f, "TOP", 0, -4)
             f.title:Show()
         end
-        if f.announceBtn then
+        local row2Prev = nil
+        if f.nameBtn and f.nameBtn:IsShown() then
+            row2Prev = f.nameBtn
+        end
+        if f.announceBtn and f.announceBtn:IsShown() then
             f.announceBtn:ClearAllPoints()
-            f.announceBtn:SetPoint("LEFT", f.nameBtn, "RIGHT", 4, 0)
-            f.announceBtn:Show()
+            if row2Prev then
+                f.announceBtn:SetPoint("LEFT", row2Prev, "RIGHT", 4, 0)
+            else
+                f.announceBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -18)
+            end
+            row2Prev = f.announceBtn
         end
         local midBtn = f.addBtn or f.removeBtn
-        if midBtn then
+        if midBtn and midBtn:IsShown() then
             midBtn:ClearAllPoints()
-            if f.announceBtn then
-                midBtn:SetPoint("LEFT", f.announceBtn, "RIGHT", 4, 0)
+            if row2Prev then
+                midBtn:SetPoint("LEFT", row2Prev, "RIGHT", 4, 0)
             else
-                midBtn:SetPoint("LEFT", f.nameBtn, "RIGHT", 4, 0)
+                midBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -18)
             end
-            midBtn:Show()
         end
     end
 
@@ -1304,6 +1500,8 @@ function UI:RefreshFrame(f)
                 bar:SetStatusBarColor(0.08, 0.08, 0.08, 0.95)
             end
             if bar.classIcon then bar.classIcon:Hide() end
+                if bar.classIconRing then bar.classIconRing:Hide() end
+                if bar.classIconHolder then bar.classIconHolder:Hide() end
             if bar.nameText then
                 bar.nameText:ClearAllPoints()
                 bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
@@ -1346,6 +1544,8 @@ function UI:RefreshFrame(f)
                     bar:SetStatusBarColor(0.9, 0.9, 0.9, 0.85)
                 end
                 if bar.classIcon then bar.classIcon:Hide() end
+                if bar.classIconRing then bar.classIconRing:Hide() end
+                if bar.classIconHolder then bar.classIconHolder:Hide() end
                 if bar.nameText then
                     bar.nameText:ClearAllPoints()
                     bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
@@ -1367,20 +1567,71 @@ function UI:RefreshFrame(f)
                     end
                     local coords = UI.CLASS_ICON_TCOORDS and class and UI.CLASS_ICON_TCOORDS[class]
                     if coords then
-                        bar.classIcon:SetWidth(barH)
-                        bar.classIcon:SetHeight(barH)
+                        local circular = OM.GetSetting and OM:GetSetting("circularClassIcons") == true
+                        local holder = bar.classIconHolder
+                        local iconH = barH
+                        if circular then
+                            iconH = barH + 1
+                        end
+                        if holder then
+                            holder:SetWidth(iconH)
+                            holder:SetHeight(iconH)
+                            holder:ClearAllPoints()
+                            holder:SetPoint("LEFT", bar, "LEFT", 1, 0)
+                            holder:Show()
+                        end
                         bar.classIcon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
-                        bar.classIcon:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
+                        bar.classIcon:ClearAllPoints()
+                        if circular then
+                            -- Same ratios as the minimap button (32 / 20 / 53)
+                            local iconSize = iconH * 20 / 32
+                            if iconSize < 8 then iconSize = iconH * 0.7 end
+                            bar.classIcon:SetWidth(iconSize)
+                            bar.classIcon:SetHeight(iconSize)
+                            bar.classIcon:SetPoint("CENTER", holder or bar, "CENTER", 0, 1)
+                            local pad = 0.07
+                            local l = coords[1] + (coords[2] - coords[1]) * pad
+                            local r = coords[2] - (coords[2] - coords[1]) * pad
+                            local tcoord = coords[3] + (coords[4] - coords[3]) * pad
+                            local b = coords[4] - (coords[4] - coords[3]) * pad
+                            bar.classIcon:SetTexCoord(l, r, tcoord, b)
+                        else
+                            bar.classIcon:SetWidth(barH)
+                            bar.classIcon:SetHeight(barH)
+                            if holder then
+                                bar.classIcon:SetAllPoints(holder)
+                            else
+                                bar.classIcon:SetPoint("LEFT", bar, "LEFT", 0, 0)
+                            end
+                            bar.classIcon:SetTexCoord(coords[1], coords[2], coords[3], coords[4])
+                        end
                         bar.classIcon:Show()
+                        if bar.classIconRing then
+                            if circular and holder then
+                                local ring = iconH * 53 / 32
+                                bar.classIconRing:ClearAllPoints()
+                                bar.classIconRing:SetWidth(ring)
+                                bar.classIconRing:SetHeight(ring)
+                                bar.classIconRing:SetPoint("TOPLEFT", holder, "TOPLEFT", 0, 0)
+                                bar.classIconRing:Show()
+                            else
+                                bar.classIconRing:Hide()
+                            end
+                        end
                         bar.nameText:ClearAllPoints()
-                        bar.nameText:SetPoint("LEFT", bar.classIcon, "RIGHT", 2, 0)
+                        local anchor = holder or bar.classIcon
+                        bar.nameText:SetPoint("LEFT", anchor, "RIGHT", 3, 0)
                     else
                         bar.classIcon:Hide()
+                        if bar.classIconRing then bar.classIconRing:Hide() end
+                if bar.classIconHolder then bar.classIconHolder:Hide() end
                         bar.nameText:ClearAllPoints()
                         bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
                     end
                 else
                     if bar.classIcon then bar.classIcon:Hide() end
+                if bar.classIconRing then bar.classIconRing:Hide() end
+                if bar.classIconHolder then bar.classIconHolder:Hide() end
                     bar.nameText:ClearAllPoints()
                     bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
                 end
