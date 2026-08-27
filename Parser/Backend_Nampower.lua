@@ -64,6 +64,27 @@ local function SpellName(spellId)
     return "Spell " .. tostring(spellId)
 end
 
+local function CreditNampowerAbsorb(buffedUnit, amount, shieldHint)
+    amount = tonumber(amount) or 0
+    if amount <= 0 or not buffedUnit then return end
+    if NS.H and NS.H.CreditAbsorb then
+        NS.H.CreditAbsorb(buffedUnit, amount, shieldHint or "Absorb")
+        return
+    end
+    local applicator, spell
+    if NS.GetAbsorbApplicator then
+        applicator, spell = NS.GetAbsorbApplicator(buffedUnit)
+    end
+    local src = applicator or buffedUnit
+    local label = shieldHint
+    if not label or label == "" or label == "Absorb" then
+        label = spell or "Absorb"
+    end
+    if Parser.AddHealing then
+        Parser:AddHealing(src, amount, label, true, buffedUnit, "hit")
+    end
+end
+
 local function IsHardCCName(name)
     if not name or name == "" then return false end
     if HARD_CC[name] then return true end
@@ -361,6 +382,8 @@ local function OnAutoAttack(isSelf)
     local totalDamage = tonumber(arg3) or 0
     local hitInfo = tonumber(arg4) or 0
     local victimState = tonumber(arg5)
+    -- arg6 subDamageCount, arg7 blockedAmount, arg8 totalAbsorb, arg9 totalResist
+    local totalAbsorb = tonumber(arg8) or 0
 
     local src = ResolveAttacker(attackerGuid, isSelf)
     local tgt = ResolveTargetName(targetGuid, isSelf and true or false)
@@ -369,6 +392,10 @@ local function OnAutoAttack(isSelf)
 
     local srcTracked = IsTrackedAttacker(attackerGuid, src)
     local tgtTracked = IsTrackedName(tgt)
+
+    if totalAbsorb > 0 and tgt then
+        CreditNampowerAbsorb(tgt, totalAbsorb, "Absorb")
+    end
 
     if totalDamage > 0 then
         local hitType = "hit"
@@ -420,11 +447,16 @@ local function OnSpellDamage(isSelf)
     if HasBit(hitInfo, SPELL_CRIT) then hitType = "crit" end
 
     local partial = false
+    local absorbAmt = 0
     if mitigation and type(mitigation) == "string" then
         local _, _, ab, bl, rs = string.find(mitigation, "(%d+),(%d+),(%d+)")
+        absorbAmt = tonumber(ab) or 0
         if ab and ((tonumber(bl) or 0) > 0 or (tonumber(rs) or 0) > 0) then
             partial = true
         end
+    end
+    if absorbAmt > 0 and tgt then
+        CreditNampowerAbsorb(tgt, absorbAmt, "Absorb")
     end
 
     -- DoT tick vs upfront hit (CombatLedger-style):
@@ -494,6 +526,10 @@ local function OnSpellMiss(isSelf)
             Parser:AddResist(src, spell, tgt)
         end
         return
+    elseif string.find(lower, "absorb", 1, true) then
+        -- Full absorb: amount lives on SPELL_DAMAGE mitigation when present;
+        -- this miss-type is only a fallback signal with no amount.
+        return
     end
 
     if IsTrackedAttacker(casterGuid, src) then
@@ -547,6 +583,23 @@ local function OnAuraCast()
         if src then CachePair(casterGuid, src) end
     end
 
+    -- Absorb shields: remember caster so later absorbed damage can be credited
+    if name and NS.IsAbsorbShield and NS.IsAbsorbShield(name) then
+        local tgtName = nil
+        if targetGuid then
+            tgtName = NameFromGuid(targetGuid)
+            if tgtName then CachePair(targetGuid, tgtName) end
+        end
+        if src and tgtName then
+            if NS.NoteRecentAbsorbCaster then
+                NS.NoteRecentAbsorbCaster(name, src, tgtName)
+            end
+            if NS.SetAbsorbAura then
+                NS.SetAbsorbAura(tgtName, name, src)
+            end
+        end
+    end
+
     -- Flat threat casts: pet Growl / VW Torment / player Sunder, etc.
     -- AddThreatCast resolves pets → owner and filters to known abilities.
     if src and Parser.AddThreatCast then
@@ -565,6 +618,46 @@ local function OnAuraCast()
         spellName = name,
         duration = HardCCDuration(name),
     }
+end
+
+-- BUFF_ADDED / BUFF_REMOVED: guid, slot, spellId, ...
+-- No caster on these events. Pair with AURA_CAST (caster+target) when possible.
+local function OnBuffAdded()
+    local guid, spellId = arg1, arg3
+    spellId = tonumber(spellId)
+    if not guid or not spellId then return end
+    local name = SpellName(spellId)
+    if not name or not NS.IsAbsorbShield or not NS.IsAbsorbShield(name) then return end
+    local tgt = NameFromGuid(guid)
+    if tgt then CachePair(guid, tgt) end
+    if not tgt then return end
+    local applicator = nil
+    if NS.GetRecentAbsorbCaster then
+        applicator = NS.GetRecentAbsorbCaster(name)
+    end
+    if NS.GetAbsorbApplicator and not applicator then
+        local app = NS.GetAbsorbApplicator(tgt)
+        applicator = app
+    end
+    applicator = applicator or tgt
+    if NS.SetAbsorbAura then
+        NS.SetAbsorbAura(tgt, name, applicator)
+    end
+    if NS.NoteRecentAbsorbCaster then
+        NS.NoteRecentAbsorbCaster(name, applicator, tgt)
+    end
+end
+
+local function OnBuffRemoved()
+    local guid, spellId = arg1, arg3
+    spellId = tonumber(spellId)
+    if not guid or not spellId then return end
+    local name = SpellName(spellId)
+    if not name or not NS.IsAbsorbShield or not NS.IsAbsorbShield(name) then return end
+    local tgt = NameFromGuid(guid)
+    if tgt and NS.ClearAbsorbAura then
+        NS.ClearAbsorbAura(tgt, name)
+    end
 end
 
 -- DEBUFF_ADDED: guid, slot, spellId, stacks, ...
@@ -688,6 +781,10 @@ function NP.Enable()
     -- CC (aura correlation)
     f:RegisterEvent("AURA_CAST_ON_SELF")
     f:RegisterEvent("AURA_CAST_ON_OTHER")
+    f:RegisterEvent("BUFF_ADDED_SELF")
+    f:RegisterEvent("BUFF_ADDED_OTHER")
+    f:RegisterEvent("BUFF_REMOVED_SELF")
+    f:RegisterEvent("BUFF_REMOVED_OTHER")
     f:RegisterEvent("DEBUFF_ADDED_SELF")
     f:RegisterEvent("DEBUFF_ADDED_OTHER")
     f:RegisterEvent("DEBUFF_REMOVED_SELF")
@@ -721,6 +818,10 @@ function NP.Enable()
             OnDispel()
         elseif ev == "AURA_CAST_ON_SELF" or ev == "AURA_CAST_ON_OTHER" then
             OnAuraCast()
+        elseif ev == "BUFF_ADDED_SELF" or ev == "BUFF_ADDED_OTHER" then
+            OnBuffAdded()
+        elseif ev == "BUFF_REMOVED_SELF" or ev == "BUFF_REMOVED_OTHER" then
+            OnBuffRemoved()
         elseif ev == "DEBUFF_ADDED_SELF" or ev == "DEBUFF_ADDED_OTHER" then
             OnDebuffAdded()
         elseif ev == "DEBUFF_REMOVED_SELF" or ev == "DEBUFF_REMOVED_OTHER" then

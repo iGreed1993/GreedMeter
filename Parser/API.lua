@@ -1842,6 +1842,7 @@ NS.GetRecentAbsorbCaster = GetRecentAbsorbCaster
 NS.SetAbsorbAura = SetAbsorbAura
 NS.ClearAbsorbAura = ClearAbsorbAura
 NS.GetAbsorbApplicator = GetAbsorbApplicator
+NS.RECENT_CASTER_TIMEOUT = RECENT_CASTER_TIMEOUT
 
 NS.SpellInSet = SpellInSet
 NS.SpellLookup = SpellLookup

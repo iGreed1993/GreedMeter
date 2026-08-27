@@ -2215,38 +2215,60 @@ end
 local function EnsureWarnGlow()
     if warnGlowFrame then return warnGlowFrame end
     local f = CreateFrame("Frame", "GreedMeterThreatWarnGlow", UIParent)
-    f:SetFrameStrata("FULLSCREEN_DIALOG")
+    f:SetFrameStrata("BACKGROUND")
+    f:SetFrameLevel(0)
     f:SetAllPoints(UIParent)
+    f:EnableMouse(false)
     f:Hide()
-    local edges = {
-        { "TOP",    0, 0, 1, 0.12 },
-        { "BOTTOM", 0, 0, 1, 0.12 },
-        { "LEFT",   0, 0, 0.08, 1 },
-        { "RIGHT",  0, 0, 0.08, 1 },
+
+    local screenW = UIParent:GetWidth() or 1024
+    local screenH = UIParent:GetHeight() or 768
+    local topH = screenH * 0.06
+    local sideW = screenW * 0.04
+    -- Outer → inner: stronger at the monitor edge, fade toward center
+    local bands = {
+        { 0.30, 0.22 },
+        { 0.18, 0.26 },
+        { 0.09, 0.26 },
+        { 0.03, 0.26 },
     }
-    local i
-    for i = 1, table.getn(edges) do
-        local e = edges[i]
-        local t = f:CreateTexture(nil, "BACKGROUND")
-        t:SetTexture(1, 0.05, 0.05, 0.55)
-        if e[1] == "TOP" then
-            t:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
-            t:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, 0)
-            t:SetHeight(UIParent:GetHeight() * e[5])
-        elseif e[1] == "BOTTOM" then
-            t:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, 0)
-            t:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
-            t:SetHeight(UIParent:GetHeight() * e[5])
-        elseif e[1] == "LEFT" then
-            t:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
-            t:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, 0)
-            t:SetWidth(UIParent:GetWidth() * e[4])
-        else
-            t:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, 0)
-            t:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, 0)
-            t:SetWidth(UIParent:GetWidth() * e[4])
-        end
+
+    local function Band(alpha)
+        local tex = f:CreateTexture(nil, "BACKGROUND")
+        tex:SetTexture(1, 0.06, 0.06, alpha)
+        return tex
     end
+
+    local yOff = 0
+    local i
+    for i = 1, table.getn(bands) do
+        local h = topH * bands[i][2]
+        local top = Band(bands[i][1])
+        top:SetPoint("TOPLEFT", f, "TOPLEFT", 0, -yOff)
+        top:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, -yOff)
+        top:SetHeight(h)
+        local bot = Band(bands[i][1])
+        bot:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, yOff)
+        bot:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, yOff)
+        bot:SetHeight(h)
+        yOff = yOff + h
+    end
+
+    -- Sides sit between the top and bottom stacks so corners are not doubled
+    local xOff = 0
+    for i = 1, table.getn(bands) do
+        local w = sideW * bands[i][2]
+        local left = Band(bands[i][1])
+        left:SetPoint("TOPLEFT", f, "TOPLEFT", xOff, -topH)
+        left:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", xOff, topH)
+        left:SetWidth(w)
+        local right = Band(bands[i][1])
+        right:SetPoint("TOPRIGHT", f, "TOPRIGHT", -xOff, -topH)
+        right:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -xOff, topH)
+        right:SetWidth(w)
+        xOff = xOff + w
+    end
+
     warnGlowFrame = f
     return f
 end

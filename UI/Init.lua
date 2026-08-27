@@ -555,6 +555,7 @@ local MODE_COLOR_PALETTE = {
     { 0.95, 0.20, 0.70 }, -- Magenta
     { 0.10, 0.65, 0.55 }, -- Teal
     { 1.00, 0.50, 0.40 }, -- Coral
+    { 0.00, 0.00, 0.00 }, -- Black
 }
 
 local function GetColumnSetting(mode, key)
@@ -634,6 +635,9 @@ local function FormatBarName(rank, name, mode)
     local abv = OM.GetSetting and OM:GetSetting("abbreviateNames") == true
     if abv then
         name = AbbreviateName(name)
+    end
+    if OM.GetSetting and OM:GetSetting("hideRankNumbers") == true then
+        showRank = false
     end
     if showRank and rank then
         return tostring(rank) .. ". " .. name

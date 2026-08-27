@@ -83,11 +83,27 @@ function UI:AnnounceFrame(f)
         end
     end
 
+    -- Chat order is always true rank. Self-on-top only changes the meter window.
+    table.sort(list, function(a, b)
+        local ra = a.rank or 9999
+        local rb = b.rank or 9999
+        if ra == rb then
+            return (a.name or "") < (b.name or "")
+        end
+        return ra < rb
+    end)
+
     local i
-    for i = 1, table.getn(list) do local entry = list[i]
-        if i > limit then break end
-        local line = i .. ". " .. entry.name .. " - " .. GetSecondaryText(entry.data, mode, duration, metricTotal)
-        SendChatMessage(line, channel)
+    local sent = 0
+    for i = 1, table.getn(list) do
+        local entry = list[i]
+        if not entry.isTotal then
+            sent = sent + 1
+            if sent > limit then break end
+            local place = entry.rank or sent
+            local line = place .. ". " .. entry.name .. " - " .. GetSecondaryText(entry.data, mode, duration, metricTotal)
+            SendChatMessage(line, channel)
+        end
     end
 end
 
@@ -331,8 +347,6 @@ function UI:CreateSettingsFrame()
         "Reset meter data after leaving a party or raid. Follows Confirm before reset.")
     y = y - 24
     AddCheckbox(pageGeneral, "Confirm before announce", 16, y, "confirmAnnounce", "Show a confirmation popup when pressing Announce")
-    y = y - 24
-    AddCheckbox(pageGeneral, "Show total bar", 16, y, "showTotal", "Add a Total row summing all players")
     y = y - 24
     local testCb = AddCheckbox(pageGeneral, "Test mode", 16, y, "testMode",
         "Fill the meter with fake 40-player raid data. Uncheck to clear it.")
@@ -1664,6 +1678,11 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
 
     MakeSettingCheckbox(pageDisplay, "Show fight duration", 4, y, "showFightDuration",
         "Show fight time as the first bar (centered, not ranked). Uses mode color when Mode Colors is on.")
+    MakeSettingCheckbox(pageDisplay, "Show total bar", 200, y, "showTotal",
+        "Add a Total row summing all players")
+    y = y - 22
+    MakeSettingCheckbox(pageDisplay, "Hide ranking numbers", 4, y, "hideRankNumbers",
+        "Hide the N. rank prefix on meter bars. Announce still lists true ranks.")
     y = y - 22
 
     MakeSettingCheckbox(pageDisplay, "Detailed damage/healing", 4, y, "detailedDamage",
@@ -1786,6 +1805,9 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
             if ShowAllMeterFrames then ShowAllMeterFrames() end
         end
     end
+    y = y - 22
+    MakeSettingCheckbox(pageDisplay, "Self on top", 4, y, "selfOnTop",
+        "Always show your bar first. Rank number stays your real place in the meter.")
     y = y - 24
 
     -- Right column: hide individual header buttons
@@ -1840,7 +1862,62 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     local styleDD = MakeLabeledDropDown(pageAppearance, "Bar style:", 4, y, 110, styleOpts, "barStyle")
     local fontDD = MakeLabeledDropDown(pageAppearance, "Bar font:", 160, y, 120, fontOpts, "barFont")
     MakeLabeledDropDown(pageAppearance, "Number format:", 330, y, 90, NUM_FORMATS, "numberFormat")
-    y = y - 48
+    y = y - 42
+
+    local outlineCb = MakeSettingCheckbox(pageAppearance, "Text outline", 4, y - 2, "textOutline",
+        "Draw a colored outline around bar name and value text.")
+    local outlineCol = (OM:GetSetting("textOutlineColor")) or { 0, 0, 0 }
+    local outlineSw = MakeColorSwatch(pageAppearance, 20, 14)
+    outlineSw:SetPoint("LEFT", outlineCb.label or outlineCb, "RIGHT", 8, 0)
+    outlineSw:SetColor(outlineCol[1] or 0, outlineCol[2] or 0, outlineCol[3] or 0)
+    local function SyncOutlineSwatch()
+        local on = OM:GetSetting("textOutline") == true
+        if on then
+            outlineSw:Enable()
+            outlineSw:EnableMouse(true)
+            outlineSw:SetAlpha(1)
+        else
+            outlineSw:Disable()
+            outlineSw:EnableMouse(false)
+            outlineSw:SetAlpha(0.4)
+        end
+    end
+    outlineCb.onToggle = function()
+        SyncOutlineSwatch()
+    end
+    outlineSw:SetScript("OnClick", function()
+        if OM:GetSetting("textOutline") ~= true then return end
+        ShowPalette(outlineSw, "textOutline", function(r, g, b)
+            OM:SetSetting("textOutlineColor", { r, g, b })
+            outlineSw:SetColor(r, g, b)
+            if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+            if UI.Refresh then UI:Refresh() end
+        end)
+    end)
+    SyncOutlineSwatch()
+
+    local function MakeLabeledSwatch(label, x, settingKey, def)
+        local fs = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        fs:SetPoint("LEFT", outlineCb, "LEFT", x - 4, 0)
+        fs:SetText(label)
+        local sw = MakeColorSwatch(pageAppearance, 20, 14)
+        sw:SetPoint("LEFT", fs, "RIGHT", 6, 0)
+        local col = OM:GetSetting(settingKey) or def
+        sw:SetColor(col[1] or def[1], col[2] or def[2], col[3] or def[3])
+        sw:SetScript("OnClick", function()
+            ShowPalette(sw, settingKey, function(r, g, b)
+                OM:SetSetting(settingKey, { r, g, b })
+                sw:SetColor(r, g, b)
+                if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+                if UI.Refresh then UI:Refresh() end
+            end)
+        end)
+        return sw
+    end
+    MakeLabeledSwatch("Text color", 200, "barTextColor", { 1.00, 1.00, 1.00 })
+    MakeLabeledSwatch("Title color", 340, "titleColor", { 1.00, 0.82, 0.00 })
+    MakeLabeledSwatch("Background color", 500, "windowBgColor", { 0, 0, 0 })
+    y = y - 36
 
     -- ---- Custom media import ----
     local importHdr = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1896,7 +1973,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
 
     local pathBox = CreateFrame("EditBox", "GreedMeterMediaPathBox", pageAppearance)
     pathBox:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 40, y + 4)
-    pathBox:SetWidth(420)
+    pathBox:SetWidth(360)
     pathBox:SetHeight(18)
     pathBox:SetAutoFocus(false)
     pathBox:SetFontObject(GameFontHighlightSmall)
@@ -1919,6 +1996,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     importBtn:SetHeight(20)
     importBtn:SetPoint("LEFT", pathBox, "RIGHT", 6, 0)
     importBtn:SetText("Import")
+
     y = y - 24
 
     -- Import status line
@@ -2080,10 +2158,10 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
         if UI.Refresh then UI:Refresh() end
     end)
 
-local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTemplate")
-    clearBtn:SetWidth(120)
-    clearBtn:SetHeight(18)
-    clearBtn:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 520, y + 36)
+    local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTemplate")
+    clearBtn:SetWidth(110)
+    clearBtn:SetHeight(20)
+    clearBtn:SetPoint("LEFT", importBtn, "RIGHT", 6, 0)
     clearBtn:SetText("Clear Imports")
     clearBtn:SetScript("OnClick", function()
         OM:SetSetting("customBarStyles", {})
@@ -2109,6 +2187,13 @@ local clearBtn = CreateFrame("Button", nil, pageAppearance, "UIPanelButtonTempla
     MakeSlider(pageAppearance, "Bar height", 4, y, "barHeight", 10, 28, 1, 140)
     MakeSlider(pageAppearance, "Font size", 200, y, "fontSize", 8, 18, 1, 140)
     MakeSlider(pageAppearance, "Background opacity", 400, y, "frameOpacity", 0, 100, 5, 140)
+    y = y - 40
+
+    MakeSlider(pageAppearance, "Bar spacing", 4, y, "barSpacing", 0, 16, 1, 140)
+    MakeSlider(pageAppearance, "Text spacing", 200, y, "textSpacing", -16, 16, 1, 140)
+    MakeSlider(pageAppearance, "Class icon position", 400, y, "classIconOffset", -32, 32, 1, 140)
+    y = y - 36
+    MakeSlider(pageAppearance, "Class icon size", 4, y, "classIconSize", 8, 32, 1, 140)
     y = y - 40
     if f.tabHeights then
         f.tabHeights.appearance = math.max(120, (-y) + 16)

@@ -96,9 +96,15 @@ local function ApplyFrameBackgroundOpacity(f)
     if pct < 0 then pct = 0 end
     if pct > 100 then pct = 100 end
     local a = BACKDROP_ALPHA_MAX * (pct / 100)
-    -- Whole-frame alpha stays 1 so header/bars never dim with the background
+    local bg = OM.GetSetting and OM:GetSetting("windowBgColor")
+    local br, bgc, bb = 0, 0, 0
+    if type(bg) == "table" then
+        br = bg[1] or 0
+        bgc = bg[2] or 0
+        bb = bg[3] or 0
+    end
     f:SetAlpha(1)
-    f:SetBackdropColor(0, 0, 0, a)
+    f:SetBackdropColor(br, bgc, bb, a)
     local borderA = 1
     if pct <= 0 then
         borderA = 0
@@ -109,6 +115,14 @@ local function ApplyFrameBackgroundOpacity(f)
     f._gmBgOpacityPct = pct
 end
 UI.ApplyFrameBackgroundOpacity = ApplyFrameBackgroundOpacity
+
+local function ApplyTitleColor(f)
+    if not f or not f.title then return end
+    local c = OM.GetSetting and OM:GetSetting("titleColor")
+    if type(c) ~= "table" then c = { 1.00, 0.82, 0.00 } end
+    f.title:SetTextColor(c[1] or 1, c[2] or 0.82, c[3] or 0)
+end
+UI.ApplyTitleColor = ApplyTitleColor
 
 local function SafeStartMoving(f)
     if not f then return end
@@ -291,6 +305,90 @@ end
 
 local function HideBarBackgrounds()
     return OM.GetSetting and OM:GetSetting("hideBarBackgrounds") == true
+end
+
+local function BarGap()
+    local g = OM.GetSetting and OM:GetSetting("barSpacing")
+    g = tonumber(g)
+    if not g then g = BAR_GAP or 1 end
+    if g < 0 then g = 0 end
+    return g
+end
+
+local function TextYOff()
+    local y = OM.GetSetting and OM:GetSetting("textSpacing")
+    y = tonumber(y) or 0
+    return y
+end
+
+-- Extra space under the header when bar text is shifted upward
+local function TextClearance()
+    local y = TextYOff()
+    if y > 0 then return y end
+    return 0
+end
+
+local function IconXOff()
+    local x = OM.GetSetting and OM:GetSetting("classIconOffset")
+    x = tonumber(x) or 0
+    return x
+end
+
+local OUTLINE_OFFS = {
+    { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
+}
+
+local function UpdateBarOutlines(bar)
+    if not bar then return end
+    local on = OM.GetSetting and OM:GetSetting("textOutline") == true
+    local col = OM.GetSetting and OM:GetSetting("textOutlineColor")
+    if type(col) ~= "table" then col = { 0, 0, 0 } end
+    local fontPath = (GetBarFontPath and GetBarFontPath()) or STANDARD_TEXT_FONT
+    local fontSize = (GetFontSize and GetFontSize()) or 11
+    local function sync(main, bagKey)
+        if not main then return end
+        local bag = bar[bagKey]
+        if not on then
+            if bag then
+                local i
+                for i = 1, 4 do
+                    if bag[i] then bag[i]:Hide() end
+                end
+            end
+            return
+        end
+        if not bag then
+            bag = {}
+            bar[bagKey] = bag
+        end
+        local i
+        for i = 1, 4 do
+            local fs = bag[i]
+            if not fs then
+                fs = bar:CreateFontString(nil, "BORDER", "GameFontHighlightSmall")
+                bag[i] = fs
+            end
+            fs:SetFont(fontPath, fontSize)
+            fs:SetText(main:GetText() or "")
+            fs:SetTextColor(col[1] or 0, col[2] or 0, col[3] or 0, 1)
+            fs:SetJustifyH(main:GetJustifyH() or "LEFT")
+            fs:ClearAllPoints()
+            local ox = OUTLINE_OFFS[i][1]
+            local oy = OUTLINE_OFFS[i][2]
+            fs:SetPoint("CENTER", main, "CENTER", ox, oy)
+            fs:Show()
+        end
+    end
+    local tc = OM.GetSetting and OM:GetSetting("barTextColor")
+    if type(tc) ~= "table" then tc = { 1, 1, 1 } end
+    if bar.nameText then
+        bar.nameText:SetTextColor(tc[1] or 1, tc[2] or 1, tc[3] or 1)
+    end
+    if bar.valueText then
+        bar.valueText:SetTextColor(tc[1] or 1, tc[2] or 1, tc[3] or 1)
+    end
+    sync(bar.nameText, "nameOutline")
+    sync(bar.valueText, "valueOutline")
 end
 
 local function EffectiveFooterHeight()
@@ -620,7 +718,7 @@ local f = CreateFrame("Frame", name, UIParent)
         local headerH = f.headerHeight or HEADER_HEIGHT
         local barH = (GetBarHeight and GetBarHeight()) or 16
         local footer = EffectiveFooterHeight()
-        local minH = headerH + barH + footer + 4
+        local minH = headerH + TextClearance() + barH + footer + 4
         if minH < 40 then minH = 40 end
         if newH < minH then newH = minH end
         if newH > MAX_FRAME_HEIGHT then newH = MAX_FRAME_HEIGHT end
@@ -1025,6 +1123,7 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
         f.durationLabel:Hide()
     end
 
+    ApplyTitleColor(f)
     ApplyHeaderButtonLabels(f)
     ApplyHeaderButtonVisibility(f)
     -- Size buttons to their labels before deciding one-row vs two-row
@@ -1261,7 +1360,7 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
 
     if f.barParent then
         f.barParent:ClearAllPoints()
-        f.barParent:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -headerH)
+        f.barParent:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -(headerH + TextClearance()))
         f.barParent:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, footer)
     end
 
@@ -1286,9 +1385,10 @@ function UI:LayoutBars(f)
     if width < 40 then width = 40 end
     local headerH = f.headerHeight or HEADER_HEIGHT
     local footer = EffectiveFooterHeight()
-    local avail = f:GetHeight() - headerH - footer - 4
+    local avail = f:GetHeight() - headerH - TextClearance() - footer - 4
     if avail < barH then avail = barH end
-    local fit = math.floor(avail / (barH + BAR_GAP))
+    local gap = BarGap()
+    local fit = math.floor(avail / (barH + gap))
     if fit < 1 then fit = 1 end
     if fit > MAX_BARS then fit = MAX_BARS end
     f.visibleBars = fit
@@ -1302,7 +1402,7 @@ function UI:LayoutBars(f)
         bar:SetHeight(barH)
         bar:SetWidth(width)
         bar:ClearAllPoints()
-        bar:SetPoint("TOPLEFT", f.barParent, "TOPLEFT", 0, -((i - 1) * (barH + BAR_GAP)))
+        bar:SetPoint("TOPLEFT", f.barParent, "TOPLEFT", 0, -((i - 1) * (barH + gap)))
         bar:SetStatusBarTexture(tex)
         if bar.bg then
             bar.bg:SetTexture(tex)
@@ -1313,12 +1413,15 @@ function UI:LayoutBars(f)
                 bar.bg:Show()
             end
         end
+        local ty = TextYOff()
         if bar.nameText then
             bar.nameText:SetFont(fontPath, fontSize)
+            -- Keep current left/right anchors; refresh Y via a dummy if points exist later
         end
         if bar.valueText then
             bar.valueText:SetFont(fontPath, fontSize)
         end
+        UpdateBarOutlines(bar)
     end
 end
 
@@ -1428,6 +1531,23 @@ function UI:RefreshFrame(f)
         end
     end
 
+    local selfEntry = nil
+    if OM.GetSetting and OM:GetSetting("selfOnTop") == true then
+        local me = UnitName("player")
+        if me then
+            local kept = {}
+            local si
+            for si = 1, table.getn(playerList) do
+                if playerList[si].name == me then
+                    selfEntry = playerList[si]
+                else
+                    table.insert(kept, playerList[si])
+                end
+            end
+            playerList = kept
+        end
+    end
+
     local showDuration = OM.GetSetting and OM:GetSetting("showFightDuration") == true
     -- Duration row only when fight time is meaningful
     if showDuration and (not duration or duration <= 0) then
@@ -1445,8 +1565,9 @@ function UI:RefreshFrame(f)
     if playerSlots < 0 then playerSlots = 0 end
 
     -- Scroll offset into the player list
+    local pinned = selfEntry and 1 or 0
     local playerCount = table.getn(playerList)
-    local maxScroll = playerCount - playerSlots
+    local maxScroll = playerCount - (playerSlots - pinned)
     if maxScroll < 0 then maxScroll = 0 end
     f.maxScroll = maxScroll
     if not f.scrollOffset then f.scrollOffset = 0 end
@@ -1483,7 +1604,15 @@ function UI:RefreshFrame(f)
             isDurationRow = true
         elseif i <= (durationSlot + playerSlots) then
             local playerIndex = i - durationSlot
-            entry = playerList[playerIndex + scroll]
+            if selfEntry then
+                if playerIndex == 1 then
+                    entry = selfEntry
+                else
+                    entry = playerList[(playerIndex - 1) + scroll]
+                end
+            else
+                entry = playerList[playerIndex + scroll]
+            end
         elseif hasTotal and i == (durationSlot + playerSlots + 1) then
             entry = totalEntry
         end
@@ -1504,12 +1633,12 @@ function UI:RefreshFrame(f)
                 if bar.classIconHolder then bar.classIconHolder:Hide() end
             if bar.nameText then
                 bar.nameText:ClearAllPoints()
-                bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
+                bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, TextYOff())
                 bar.nameText:SetText("")
             end
             if bar.valueText then
                 bar.valueText:ClearAllPoints()
-                bar.valueText:SetPoint("CENTER", bar, "CENTER", 0, 0)
+                bar.valueText:SetPoint("CENTER", bar, "CENTER", 0, TextYOff())
                 bar.valueText:SetJustifyH("CENTER")
                 if UI.FormatDuration then
                     bar.valueText:SetText(UI:FormatDuration(duration) or "")
@@ -1521,6 +1650,7 @@ function UI:RefreshFrame(f)
             bar.mode = mode
             bar.duration = duration
             bar.isDurationRow = true
+            UpdateBarOutlines(bar)
         elseif entry and i <= fit then
             shown = shown + 1
             local pct = entry.value / maxVal
@@ -1533,7 +1663,7 @@ function UI:RefreshFrame(f)
             -- Restore value text to the right edge (duration row may have centered it)
             if bar.valueText then
                 bar.valueText:ClearAllPoints()
-                bar.valueText:SetPoint("RIGHT", bar, "RIGHT", -4, 0)
+                bar.valueText:SetPoint("RIGHT", bar, "RIGHT", -4, TextYOff())
                 bar.valueText:SetJustifyH("RIGHT")
             end
             if entry.isTotal then
@@ -1548,7 +1678,7 @@ function UI:RefreshFrame(f)
                 if bar.classIconHolder then bar.classIconHolder:Hide() end
                 if bar.nameText then
                     bar.nameText:ClearAllPoints()
-                    bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
+                    bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, TextYOff())
                     bar.nameText:SetText("Total")
                 end
                 -- Total row: no share %, still show amount and rate
@@ -1569,15 +1699,17 @@ function UI:RefreshFrame(f)
                     if coords then
                         local circular = OM.GetSetting and OM:GetSetting("circularClassIcons") == true
                         local holder = bar.classIconHolder
-                        local iconH = barH
+                        local iconH = tonumber(OM.GetSetting and OM:GetSetting("classIconSize")) or 0
+                        if iconH < 8 then iconH = barH end
                         if circular then
-                            iconH = barH + 1
+                            iconH = iconH + 1
                         end
+                        local iconX = 1 + IconXOff()
                         if holder then
                             holder:SetWidth(iconH)
                             holder:SetHeight(iconH)
                             holder:ClearAllPoints()
-                            holder:SetPoint("LEFT", bar, "LEFT", 1, 0)
+                            holder:SetPoint("LEFT", bar, "LEFT", iconX, 0)
                             holder:Show()
                         end
                         bar.classIcon:SetTexture("Interface\\Glues\\CharacterCreate\\UI-CharacterCreate-Classes")
@@ -1596,8 +1728,8 @@ function UI:RefreshFrame(f)
                             local b = coords[4] - (coords[4] - coords[3]) * pad
                             bar.classIcon:SetTexCoord(l, r, tcoord, b)
                         else
-                            bar.classIcon:SetWidth(barH)
-                            bar.classIcon:SetHeight(barH)
+                            bar.classIcon:SetWidth(iconH)
+                            bar.classIcon:SetHeight(iconH)
                             if holder then
                                 bar.classIcon:SetAllPoints(holder)
                             else
@@ -1619,21 +1751,26 @@ function UI:RefreshFrame(f)
                             end
                         end
                         bar.nameText:ClearAllPoints()
-                        local anchor = holder or bar.classIcon
-                        bar.nameText:SetPoint("LEFT", anchor, "RIGHT", 3, 0)
+                        -- Text stays on the bar even if the icon is slid off the left edge
+                        local textX = 4
+                        if iconX + iconH > 2 then
+                            local after = iconX + iconH + 3
+                            if after > 4 then textX = after end
+                        end
+                        bar.nameText:SetPoint("LEFT", bar, "LEFT", textX, TextYOff())
                     else
                         bar.classIcon:Hide()
                         if bar.classIconRing then bar.classIconRing:Hide() end
                 if bar.classIconHolder then bar.classIconHolder:Hide() end
                         bar.nameText:ClearAllPoints()
-                        bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
+                        bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, TextYOff())
                     end
                 else
                     if bar.classIcon then bar.classIcon:Hide() end
                 if bar.classIconRing then bar.classIconRing:Hide() end
                 if bar.classIconHolder then bar.classIconHolder:Hide() end
                     bar.nameText:ClearAllPoints()
-                    bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, 0)
+                    bar.nameText:SetPoint("LEFT", bar, "LEFT", 4, TextYOff())
                 end
                 if UI.FormatBarName then
                     bar.nameText:SetText(UI.FormatBarName(rank, entry.name, mode))
@@ -1645,9 +1782,11 @@ function UI:RefreshFrame(f)
             bar.entry = entry
             bar.mode = mode
             bar.duration = duration
+            UpdateBarOutlines(bar)
         else
             bar:Hide()
             bar.entry = nil
+            UpdateBarOutlines(bar)
         end
     end
 

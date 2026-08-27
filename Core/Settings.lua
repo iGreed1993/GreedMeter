@@ -10,6 +10,17 @@ OM.defaults = {
     classColors = true,
     showClassIcons = false,
     circularClassIcons = false, -- round class icons (minimap-style ring)
+    selfOnTop = false, -- pin local player as first visible bar; rank unchanged
+    hideRankNumbers = false, -- hide N. on bars; announce still uses rank
+    textOutline = false,
+    textOutlineColor = { 0, 0, 0 },
+    titleColor = { 1.00, 0.82, 0.00 },
+    barTextColor = { 1.00, 1.00, 1.00 },
+    windowBgColor = { 0, 0, 0 },
+    barSpacing = 1, -- extra pixels between bars
+    textSpacing = 0, -- vertical offset of bar text from bar center
+    classIconOffset = 0, -- horizontal class icon shift
+    classIconSize = 16, -- class icon pixel size (independent of bar height)
     buttonsColorWithMode = false, -- tint header buttons with the window's mode color
     barStyle = "Default",   -- status bar texture style
     barFont = "Friz",       -- bar text font
@@ -117,7 +128,8 @@ function OM:GetSetting(key)
         v = self.defaults[key]
     end
     -- Numeric settings can occasionally be stored as strings via the slider
-    if key == "frameOpacity" or key == "barHeight" or key == "fontSize" or key == "announceLines" then
+    if key == "frameOpacity" or key == "barHeight" or key == "fontSize" or key == "announceLines"
+        or key == "classIconSize" or key == "classIconOffset" or key == "barSpacing" or key == "textSpacing" then
         local n = tonumber(v)
         if n ~= nil then return n end
     end

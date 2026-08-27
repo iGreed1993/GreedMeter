@@ -42,6 +42,7 @@ local GetRecentAbsorbCaster = NS.GetRecentAbsorbCaster
 local SetAbsorbAura = NS.SetAbsorbAura
 local ClearAbsorbAura = NS.ClearAbsorbAura
 local GetAbsorbApplicator = NS.GetAbsorbApplicator
+local RECENT_CASTER_TIMEOUT = NS.RECENT_CASTER_TIMEOUT or 8
 
 local playerName = UnitName("player")
 if ST then ST.playerName = playerName end
@@ -486,13 +487,21 @@ local function ResolvePriestShieldApplicator()
     if total <= 0 then return nil end
 
     table.sort(priests, function(a, b)
-        if heals[a] == heals[b] then return a < b end
-        return heals[a] > heals[b]
+        local ha = heals[a] or 0
+        local hb = heals[b] or 0
+        if ha == hb then
+            return tostring(a or "") < tostring(b or "")
+        end
+        return ha > hb
     end)
     local top = priests[1]
     local second = priests[2]
-    local topShare = heals[top] / total
-    local secondShare = heals[second] / total
+    if not top then return nil end
+    if not second then return top end
+    local topH = heals[top] or 0
+    local secondH = heals[second] or 0
+    local topShare = topH / total
+    local secondShare = secondH / total
     if (topShare - secondShare) >= 0.15 then
         return top
     end
