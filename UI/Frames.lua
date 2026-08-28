@@ -338,6 +338,28 @@ local OUTLINE_OFFS = {
     { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
 }
 
+local function EnsureBarTextLayer(bar)
+    if bar.textLayer then return bar.textLayer end
+    local f = CreateFrame("Frame", nil, bar)
+    f:SetAllPoints(bar)
+    f:EnableMouse(false)
+    local lvl = 1
+    if bar.GetFrameLevel then
+        lvl = (bar:GetFrameLevel() or 1) + 5
+    end
+    f:SetFrameLevel(lvl)
+    bar.textLayer = f
+    if bar.nameText then
+        bar.nameText:SetParent(f)
+        if bar.nameText.SetDrawLayer then bar.nameText:SetDrawLayer("OVERLAY") end
+    end
+    if bar.valueText then
+        bar.valueText:SetParent(f)
+        if bar.valueText.SetDrawLayer then bar.valueText:SetDrawLayer("OVERLAY") end
+    end
+    return f
+end
+
 local function UpdateBarOutlines(bar)
     if not bar then return end
     local on = OM.GetSetting and OM:GetSetting("textOutline") == true
@@ -345,13 +367,14 @@ local function UpdateBarOutlines(bar)
     if type(col) ~= "table" then col = { 0, 0, 0 } end
     local fontPath = (GetBarFontPath and GetBarFontPath()) or STANDARD_TEXT_FONT
     local fontSize = (GetFontSize and GetFontSize()) or 11
+    local layer = EnsureBarTextLayer(bar)
     local function sync(main, bagKey)
         if not main then return end
         local bag = bar[bagKey]
         if not on then
             if bag then
                 local i
-                for i = 1, 4 do
+                for i = 1, 8 do
                     if bag[i] then bag[i]:Hide() end
                 end
             end
@@ -365,18 +388,25 @@ local function UpdateBarOutlines(bar)
         for i = 1, 4 do
             local fs = bag[i]
             if not fs then
-                fs = bar:CreateFontString(nil, "BORDER", "GameFontHighlightSmall")
+                fs = layer:CreateFontString(nil, "ARTWORK")
                 bag[i] = fs
+            else
+                if fs.SetParent then fs:SetParent(layer) end
+                if fs.SetDrawLayer then fs:SetDrawLayer("ARTWORK") end
             end
             fs:SetFont(fontPath, fontSize)
             fs:SetText(main:GetText() or "")
             fs:SetTextColor(col[1] or 0, col[2] or 0, col[3] or 0, 1)
             fs:SetJustifyH(main:GetJustifyH() or "LEFT")
             fs:ClearAllPoints()
-            local ox = OUTLINE_OFFS[i][1]
-            local oy = OUTLINE_OFFS[i][2]
-            fs:SetPoint("CENTER", main, "CENTER", ox, oy)
+            fs:SetPoint("CENTER", main, "CENTER", OUTLINE_OFFS[i][1], OUTLINE_OFFS[i][2])
             fs:Show()
+        end
+        if bag[5] then
+            local j
+            for j = 5, 8 do
+                if bag[j] then bag[j]:Hide() end
+            end
         end
     end
     local tc = OM.GetSetting and OM:GetSetting("barTextColor")

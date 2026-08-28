@@ -1477,7 +1477,8 @@ local function ShowPalette(anchor, mode, onPick)
 
         local title = pf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         title:SetPoint("TOP", pf, "TOP", 0, -6)
-        title:SetText("Mode Color")
+        title:SetText("Color")
+        pf.title = title
 
         -- Sub-frame above the palette backdrop for the actual color buttons
         local holder = CreateFrame("Frame", nil, pf)
@@ -1521,6 +1522,15 @@ local function ShowPalette(anchor, mode, onPick)
 
     paletteTargetMode = mode
     paletteOnPick = onPick
+    local titles = {
+        textOutline = "Outline Color",
+        barTextColor = "Text Color",
+        titleColor = "Title Color",
+        windowBgColor = "Background Color",
+    }
+    if paletteFrame.title then
+        paletteFrame.title:SetText(titles[mode] or "Mode Color")
+    end
     paletteFrame:ClearAllPoints()
     paletteFrame:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
 
