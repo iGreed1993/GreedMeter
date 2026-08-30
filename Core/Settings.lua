@@ -53,8 +53,6 @@ OM.defaults = {
     confirmReset = false,
     partyJoinReset = false, -- reset when joining a party or raid
     partyLeaveReset = false, -- reset when leaving a party or raid
-    -- Test toggles: allow forcing backends off while the client mods stay installed
-    useSuperWoW = true,  -- when false, skip SuperWoW RAW + GUID helpers even if present
     confirmAnnounce = false,
     accountWideLayout = false, -- when true, window size/pos/count is shared across characters
     abbreviateNames = false,
@@ -97,6 +95,7 @@ function OM:InitDB()
     -- Migrate old account-wide size keys out of the way
     GreedMeterDB.frameWidth = nil
     GreedMeterDB.frameHeight = nil
+    GreedMeterDB.testMode = false
     if not GreedMeterDB.frames then
         GreedMeterDB.frames = {}
     end

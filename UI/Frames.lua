@@ -37,14 +37,10 @@ local ShowBarTooltip = UI.ShowBarTooltip
 
 
 -- ============================================================
--- Position clamping (no clamp-during-drag).
--- Avoid SetClampedToScreen on meter frames (some 1.12 clients crash on StartMoving).
--- Clamp in Lua after drag, after layout restore, and before saving.
+-- Position clamping
 -- ============================================================
-
--- Clamp using real on-screen edges (GetLeft/Right/Top/Bottom).
--- Avoid GetWidth/GetHeight vs UIParent:GetWidth — those mix local size with
--- screen coords and over-push on top/right under many UI scales.
+-- Manual clamp after drag/restore/save. SetClampedToScreen + StartMoving
+-- can crash some 1.12 clients.
 local function ClampFrameToScreen(f)
     if not f or not f.GetLeft then return end
     local left = f:GetLeft()
@@ -149,31 +145,49 @@ function UI:SaveAllFrameLayouts()
     if not OM.GetLayoutDB then return end
     local layoutDB = OM:GetLayoutDB()
     if not layoutDB then return end
-    layoutDB.frames = {}
+    local old = layoutDB.frames
+    if type(old) ~= "table" then old = {} end
+    local newFrames = {}
     local i, f
-    for i = 1, table.getn(self.frames) do local f = self.frames[i]
-        if f and f:GetLeft() then
-            -- Sanitize before persist (resolution changes, partial off-screen, etc.)
-            ClampFrameToScreen(f)
-            local point, _, relativePoint, x, y = f:GetPoint(1)
-            local entry = {
-                point = point or "CENTER",
-                relativePoint = relativePoint or "CENTER",
-                x = x or 0,
-                y = y or 0,
-                width = f:GetWidth(),
-                height = f:GetHeight(),
-                mode = f.mode or "damage",
-                shown = f:IsShown() and true or false,
-            }
-            -- Persist segment only for Current / Overall (fight segments are ephemeral)
-            local seg = f.segment or "current"
+    for i = 1, table.getn(self.frames) do
+        local f = self.frames[i]
+        if f then
+            local prev = old[i] or {}
+            local entry
+            if f.GetLeft and f:GetLeft() then
+                ClampFrameToScreen(f)
+                local point, _, relativePoint, x, y = f:GetPoint(1)
+                entry = {
+                    point = point or prev.point or "CENTER",
+                    relativePoint = relativePoint or prev.relativePoint or "CENTER",
+                    x = x or prev.x or 0,
+                    y = y or prev.y or 0,
+                    width = f:GetWidth() or prev.width,
+                    height = f:GetHeight() or prev.height,
+                    mode = f.mode or prev.mode or "damage",
+                    shown = f:IsShown() and true or false,
+                }
+            else
+                -- Hidden frames may have no GetLeft; keep last saved point
+                entry = {
+                    point = prev.point or "CENTER",
+                    relativePoint = prev.relativePoint or "CENTER",
+                    x = prev.x or 0,
+                    y = prev.y or 0,
+                    width = f:GetWidth() or prev.width or 240,
+                    height = f:GetHeight() or prev.height or 280,
+                    mode = f.mode or prev.mode or "damage",
+                    shown = f:IsShown() and true or false,
+                }
+            end
+            local seg = f.segment or prev.segment or "current"
             if seg == "current" or seg == "overall" then
                 entry.segment = seg
             end
-            layoutDB.frames[i] = entry
+            newFrames[i] = entry
         end
     end
+    layoutDB.frames = newFrames
 end
 
 function UI:ApplySavedLayout(f, index)
@@ -214,11 +228,6 @@ function UI:ResetFramePositions()
     if self.settingsFrame then
         self.settingsFrame:ClearAllPoints()
         self.settingsFrame:SetPoint("CENTER", UIParent, "CENTER", 120, 40)
-    end
-
-    if self.customizationFrame then
-        self.customizationFrame:ClearAllPoints()
-        self.customizationFrame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     end
 
     if self.SaveAllFrameLayouts then
@@ -628,7 +637,7 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
 
     local layoutIndex = table.getn(self.frames) + 1
     local fw, fh = 240, 280
-    -- Prefer dimensions of the frame that spawned us (+ button)
+    -- New windows copy the source window size
     if copyFrom then
         fw = copyFrom:GetWidth() or fw
         fh = copyFrom:GetHeight() or fh
@@ -683,8 +692,12 @@ local f = CreateFrame("Frame", name, UIParent)
     f.bars = {}
     f.scrollOffset = 0
 
-    -- Position from char DB or default cascade
-    if not self:ApplySavedLayout(f, layoutIndex) then
+    -- + uses default center position; login restore uses saved layout
+    if copyFrom then
+        local offset = (id - 1) * 30
+        f:ClearAllPoints()
+        f:SetPoint("CENTER", UIParent, "CENTER", offset, offset)
+    elseif not self:ApplySavedLayout(f, layoutIndex) then
         local offset = (id - 1) * 30
         f:SetPoint("CENTER", UIParent, "CENTER", offset, offset)
     end
@@ -1904,7 +1917,7 @@ function UI:RestoreSavedFrames()
     if not OM.GetLayoutDB then return end
     local layoutDB = OM:GetLayoutDB()
     if not layoutDB or not layoutDB.frames then return end
-    -- OnLoad fires on both PLAYER_LOGIN and PLAYER_ENTERING_WORLD; only restore once
+    -- Already have extra windows
     if table.getn(self.frames) > 1 then return end
     local i
     for i = 2, table.getn(layoutDB.frames) do

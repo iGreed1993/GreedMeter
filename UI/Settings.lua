@@ -199,7 +199,6 @@ function UI:CreateSettingsFrame()
     f:EnableMouse(true)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function()
-        -- Never clamp during drag (native SetClampedToScreen + StartMoving can crash)
         if this.SetClampedToScreen then this:SetClampedToScreen(false) end
         this:StartMoving()
     end)
@@ -208,10 +207,8 @@ function UI:CreateSettingsFrame()
         if UI.ClampFrameToScreen then
             UI.ClampFrameToScreen(this)
         end
-        -- Do not re-enable SetClampedToScreen — manual edge clamp only
     end)
     f:SetFrameStrata("DIALOG")
-    -- Manual edge clamp only (no engine SetClampedToScreen)
 
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOP", f, "TOP", 0, -10)
@@ -350,6 +347,7 @@ function UI:CreateSettingsFrame()
     y = y - 24
     local testCb = AddCheckbox(pageGeneral, "Test mode", 16, y, "testMode",
         "Fill the meter with fake 40-player raid data. Uncheck to clear it.")
+    f.testModeCb = testCb
     testCb.onToggle = function(checked)
         if checked then
             if OM.LoadTestData then OM:LoadTestData() end
@@ -626,12 +624,17 @@ function UI:OnLoad()
         self:CreateMeterFrame(true)
     end
     self:LayoutBars(self.mainFrame)
-    -- Restore primary layout (position/size/mode) if saved
-    if self.ApplySavedLayout then
-        self:ApplySavedLayout(self.mainFrame, 1)
-    end
     if self.RestoreSavedFrames then
         self:RestoreSavedFrames()
+    end
+    self._onloadCount = (self._onloadCount or 0) + 1
+    if not self._skipReanchor then
+        if self.ApplySavedLayout then
+            self:ApplySavedLayout(self.mainFrame, 1)
+        end
+        if self._onloadCount >= 2 then
+            self._skipReanchor = true
+        end
     end
     -- Show meters on login by default (respect saved shown state from layout DB)
     local layoutDB = OM.GetLayoutDB and OM:GetLayoutDB()
@@ -784,7 +787,18 @@ function UI:OnCombatEnd()
     end
 end
 
+function UI:SyncTestModeCheckbox()
+    local sf = self.settingsFrame
+    if sf and sf.testModeCb then
+        local on = OM.GetSetting and OM:GetSetting("testMode") == true
+        sf.testModeCb:SetChecked(on and 1 or nil)
+    end
+end
+
 function UI:OnReset()
+    if self.SyncTestModeCheckbox then
+        self:SyncTestModeCheckbox()
+    end
     local _, f
     for _gi = 1, table.getn(self.frames) do local f = self.frames[_gi]
         f.scrollOffset = 0
@@ -2535,12 +2549,7 @@ function UI:ToggleCustomization()
     f:Show()
 end
 
--- Backward-compatible alias + explicit global registration
-UI.ToggleAdvanced = UI.ToggleCustomization
 GreedMeter.UI = UI
-GreedMeter.UI.ToggleCustomization = UI.ToggleCustomization
-GreedMeter.UI.ToggleAdvanced = UI.ToggleCustomization
-GreedMeter._customizationLoaded = true
 
 
 OM:RegisterModule("UI", UI)

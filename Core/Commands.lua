@@ -18,7 +18,11 @@ SlashCmdList["GREEDMETER"] = function(msg)
         OM:ResetData()
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Data reset.")
     elseif cmd == "test" then
+        if OM.SetSetting then OM:SetSetting("testMode", true) end
         OM:LoadTestData()
+        if OM.modules and OM.modules.UI and OM.modules.UI.SyncTestModeCheckbox then
+            OM.modules.UI:SyncTestModeCheckbox()
+        end
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00GreedMeter:|r Loaded test data (40 players).")
         if OM.modules and OM.modules.UI then
             local ui = OM.modules.UI
