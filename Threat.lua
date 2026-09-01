@@ -2282,33 +2282,60 @@ local function ShowThreatWarnGlow()
     f:Show()
 end
 
-local function PlayerThreatPercent()
+local function InPartyOrRaid()
+    local nRaid = GetNumRaidMembers and GetNumRaidMembers() or 0
+    if nRaid and nRaid > 0 then return true end
+    local nParty = GetNumPartyMembers and GetNumPartyMembers() or 0
+    if nParty and nParty > 0 then return true end
+    return false
+end
+
+-- Live enemy you can pull off a teammate. Not players, corpses, or friendlies.
+local function WarnTargetIsLiveEnemy()
+    if not UnitExists("target") then return false end
+    if UnitIsDead("target") or (UnitIsCorpse and UnitIsCorpse("target")) then return false end
+    if UnitIsPlayer("target") then return false end
+    if UnitIsFriend("player", "target") then return false end
+    if UnitCanAttack and not UnitCanAttack("player", "target") then return false end
+    return true
+end
+
+-- Someone else currently has this mob. First-pull / you-tanking is not a warning.
+local function SomeoneElseHasAggro()
+    if not UnitExists("targettarget") then return false end
+    if UnitIsUnit("targettarget", "player") then return false end
+    if UnitExists("pet") and UnitIsUnit("targettarget", "pet") then return false end
+    if UnitIsUnit("targettarget", "target") then return false end
+    return true
+end
+
+-- Your threat as a percent of the current tank's threat (not of the list max).
+local function PlayerThreatVsTankPercent()
     local me = UnitName("player")
     if not me then return 0 end
-    local d = Threat.threats and Threat.threats[me]
-    if d and d.perc then
-        return tonumber(d.perc) or 0
+    local myRow = Threat.threats and Threat.threats[me]
+    local myT = myRow and tonumber(myRow.threat) or 0
+    local tankName = UnitExists("targettarget") and UnitName("targettarget") or nil
+    if not tankName or tankName == me then return 0 end
+    local tankRow = Threat.threats and Threat.threats[tankName]
+    local tankT = tankRow and tonumber(tankRow.threat) or 0
+    if tankT > 0 and myT > 0 then
+        return (myT / tankT) * 100
     end
-    -- Fall back: relative to max on the list
-    local maxT = 0
-    local myT = 0
-    local n, row
-    for n, row in pairs(Threat.threats or {}) do
-        if row and not row.isPull and not row.isEnemy then
-            local t = tonumber(row.threat) or 0
-            if t > maxT then maxT = t end
-            if n == me then myT = t end
-        end
+    if myRow and myRow.perc then
+        return tonumber(myRow.perc) or 0
     end
-    if maxT <= 0 then return 0 end
-    return (myT / maxT) * 100
+    return 0
 end
 
 local function ThreatWarningsAllowed()
     if not OM:GetSetting("enableThreatMode") then return false end
+    if OM:GetSetting("testMode") == true then return false end
     local v = GetThreatView()
-    -- Only single-target (and "all" which includes single). Never tank-only or overall-only.
     if v == "tank" or v == "overall" then return false end
+    if not InPartyOrRaid() then return false end
+    if not WarnTargetIsLiveEnemy() then return false end
+    if not SomeoneElseHasAggro() then return false end
     return true
 end
 
@@ -2322,7 +2349,7 @@ local function UpdateThreatWarnings()
     if threshold < 50 then threshold = 50 end
     if threshold > 100 then threshold = 100 end
 
-    local perc = PlayerThreatPercent()
+    local perc = PlayerThreatVsTankPercent()
     local over = perc >= threshold
 
     if OM:GetSetting("threatWarnGlow") == true and over then
