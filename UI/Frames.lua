@@ -154,9 +154,18 @@ function UI:SaveAllFrameLayouts()
         if f then
             local prev = old[i] or {}
             local entry
-            if f.GetLeft and f:GetLeft() then
-                ClampFrameToScreen(f)
-                local point, _, relativePoint, x, y = f:GetPoint(1)
+            local leftOk = false
+            if f.GetLeft then
+                leftOk = f:GetLeft()
+            end
+            if leftOk then
+                local point, relativePoint, x, y
+                local ok, p1, _, p2, px, py = pcall(function()
+                    return f:GetPoint(1)
+                end)
+                if ok then
+                    point, relativePoint, x, y = p1, p2, px, py
+                end
                 entry = {
                     point = point or prev.point or "CENTER",
                     relativePoint = relativePoint or prev.relativePoint or "CENTER",
@@ -775,6 +784,37 @@ local f = CreateFrame("Frame", name, UIParent)
         UI:RefreshFrame(f)
     end)
     f.resizeGrip = grip
+    grip:Hide()
+
+    local function SyncResizeGrip(owner)
+        if not owner or not owner.resizeGrip then return end
+        if FramesLocked and FramesLocked() then
+            owner.resizeGrip:Hide()
+            return
+        end
+        if owner.resizeGrip.sizing then
+            owner.resizeGrip:Show()
+            return
+        end
+        if MouseIsOver and MouseIsOver(owner) then
+            owner.resizeGrip:Show()
+        else
+            owner.resizeGrip:Hide()
+        end
+    end
+    UI.SyncResizeGrip = SyncResizeGrip
+    f:SetScript("OnEnter", function()
+        SyncResizeGrip(this)
+    end)
+    f:SetScript("OnLeave", function()
+        SyncResizeGrip(this)
+    end)
+    grip:SetScript("OnEnter", function()
+        SyncResizeGrip(f)
+    end)
+    grip:SetScript("OnLeave", function()
+        SyncResizeGrip(f)
+    end)
 
     -- Title + duration underneath
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -1065,10 +1105,10 @@ local f = CreateFrame("Frame", name, UIParent)
         f.bars[i] = bar
     end
 
-    -- Empty label
     local empty = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     empty:SetPoint("CENTER", barParent, "CENTER", 0, 0)
-    empty:SetText("No data yet")
+    empty:SetText("")
+    empty:Hide()
     f.emptyLabel = empty
 
     -- Header-style Announce (!!!)
@@ -1156,6 +1196,7 @@ end
 -- Compact vs normal header (Hide Title setting)
 function UI:ApplyHeaderLayout(f, hideTitle, duration)
     if not f then return end
+    if OM then OM._readIndex = f.layoutIndex end
     -- duration arg kept for API compat; no longer shown in header
     local compact = hideTitle and true or false
     local keepTitle = compact and KeepTitleInCompact()
@@ -1407,13 +1448,10 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
         f.barParent:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, footer)
     end
 
-    -- Resize grip visibility follows lock
-    if f.resizeGrip then
-        if FramesLocked and FramesLocked() then
-            f.resizeGrip:Hide()
-        else
-            f.resizeGrip:Show()
-        end
+    if UI.SyncResizeGrip then
+        UI.SyncResizeGrip(f)
+    elseif f.resizeGrip then
+        f.resizeGrip:Hide()
     end
 
     f.headerHeight = headerH
@@ -1421,6 +1459,7 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
 end
 
 function UI:LayoutBars(f)
+    if f and OM then OM._readIndex = f.layoutIndex end
     if not f or not f.bars then return end
     local barH = (GetBarHeight and GetBarHeight()) or 16
     local fontSize = (GetFontSize and GetFontSize()) or 11
@@ -1469,6 +1508,7 @@ function UI:LayoutBars(f)
 end
 
 function UI:RefreshFrame(f)
+    if f and OM then OM._readIndex = f.layoutIndex end
     if f then
         ApplyFrameBackgroundOpacity(f)
     end
@@ -1833,9 +1873,7 @@ function UI:RefreshFrame(f)
         end
     end
 
-    if shown == 0 then
-        f.emptyLabel:Show()
-    else
+    if f.emptyLabel then
         f.emptyLabel:Hide()
     end
 end
@@ -1851,6 +1889,9 @@ function UI:ApplySettingsToFrames()
             local hideTitle = OM.GetSetting and OM:GetSetting("hideTitle") == true
             self:ApplyHeaderLayout(f, hideTitle, 0)
         end
+    end
+    if UI.ApplySoloVisibility then
+        UI.ApplySoloVisibility()
     end
 end
 

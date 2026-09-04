@@ -2379,6 +2379,7 @@ end
 -- time, so this owns the full refresh path when f.mode == "threat".
 function Threat:RefreshFrame(f)
     if not f then return end
+    if OM then OM._readIndex = f.layoutIndex end
 
     -- Ensure test data is present when Test mode is on (no party required)
     if OM:GetSetting("testMode") == true then

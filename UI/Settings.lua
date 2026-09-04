@@ -111,6 +111,15 @@ end
 -- Settings panel
 -- ============================================================
 
+UI._setWidgets = UI._setWidgets or {}
+local function TrackSettingWidget(widget, kind, key)
+    if not widget or not key then return widget end
+    widget._sk = key
+    widget._skind = kind
+    table.insert(UI._setWidgets, widget)
+    return widget
+end
+
 local function AddCheckbox(parent, label, x, y, settingKey, tooltip, size)
     size = size or 24
     local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
@@ -122,6 +131,7 @@ local function AddCheckbox(parent, label, x, y, settingKey, tooltip, size)
     fs:SetText(label)
     cb.label = fs
     cb:SetChecked(OM:GetSetting(settingKey) and 1 or nil)
+    TrackSettingWidget(cb, "cb", settingKey)
     cb:SetScript("OnClick", function()
         local checked = this:GetChecked() and true or false
         OM:SetSetting(settingKey, checked)
@@ -152,6 +162,7 @@ local function AddSlider(parent, label, x, y, settingKey, minV, maxV, step, widt
     slider:SetMinMaxValues(minV, maxV)
     slider:SetValueStep(step or 1)
     slider:SetValue(OM:GetSetting(settingKey) or minV)
+    TrackSettingWidget(slider, "slider", settingKey)
 
     local bg = slider:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints(slider)
@@ -166,6 +177,7 @@ local function AddSlider(parent, label, x, y, settingKey, minV, maxV, step, widt
     local valText = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     valText:SetPoint("LEFT", slider, "RIGHT", 6, 0)
     valText:SetText(tostring(math.floor((OM:GetSetting(settingKey) or minV) + 0.5)))
+    slider._valText = valText
 
     slider:SetScript("OnValueChanged", function()
         local v = this:GetValue()
@@ -237,10 +249,184 @@ function UI:CreateSettingsFrame()
     content:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -42)
     content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 40)
     f.content = content
+    UI.settingsScope = 0
+
+    local RAIL_W = 128
+    local rail = CreateFrame("Frame", nil, f)
+    rail:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -42)
+    rail:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 8, 40)
+    rail:SetWidth(RAIL_W)
+    rail:SetFrameLevel(f:GetFrameLevel() + 12)
+    rail:Hide()
+    f.windowRail = rail
+    f.railWidth = RAIL_W
+    f.baseWidth = 720
+
+    local railTitle = rail:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    railTitle:SetPoint("TOPLEFT", rail, "TOPLEFT", 2, 0)
+    railTitle:SetText("Windows")
+    f.windowRailBtns = {}
+
+    local function RefreshSettingWidgets()
+        local scope = UI.settingsScope or 0
+        OM._readIndex = scope
+        local i, w
+        if UI._setWidgets then
+            for i = 1, table.getn(UI._setWidgets) do
+                w = UI._setWidgets[i]
+                if w and w._sk then
+                    local val = OM:GetSetting(w._sk)
+                    if w._skind == "cb" and w.SetChecked then
+                        w:SetChecked(val and 1 or nil)
+                    elseif w._skind == "slider" and w.SetValue then
+                        if val ~= nil then
+                            w:SetValue(val)
+                        end
+                        if w._valText then
+                            w._valText:SetText(tostring(math.floor((tonumber(val) or 0) + 0.5)))
+                        end
+                    end
+                end
+            end
+        end
+        if f.renameBox and scope >= 1 then
+            f.renameBox:SetText(OM.GetWindowLabel and OM:GetWindowLabel(scope) or ("Window " .. scope))
+        end
+        OM._readIndex = nil
+    end
+    f.RefreshSettingWidgets = RefreshSettingWidgets
+
+    local function ApplyWindowMode()
+        local specOn = OM.GetSetting and OM:GetSetting("windowSpecificSettings") == true
+        local scope = UI.settingsScope or 0
+        local per = specOn and scope >= 1
+        f.perWindowMode = per
+        if specOn then
+            if f.windowRail then f.windowRail:Show() end
+            content:ClearAllPoints()
+            content:SetPoint("TOPLEFT", f, "TOPLEFT", 14 + (f.railWidth or 128), -42)
+            content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 40)
+        else
+            UI.settingsScope = 0
+            f.perWindowMode = false
+            per = false
+            if f.windowRail then f.windowRail:Hide() end
+            content:ClearAllPoints()
+            content:SetPoint("TOPLEFT", f, "TOPLEFT", 14, -42)
+            content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 40)
+        end
+        local tabY = per and -22 or 0
+        if f.tabGeneral then
+            if per then
+                f.tabGeneral:Hide()
+            else
+                f.tabGeneral:Show()
+                f.tabGeneral:ClearAllPoints()
+                f.tabGeneral:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+            end
+        end
+        if f.tabModes then
+            if per then
+                f.tabModes:Hide()
+            else
+                f.tabModes:Show()
+                f.tabModes:ClearAllPoints()
+                f.tabModes:SetPoint("TOPLEFT", content, "TOPLEFT", 300, 0)
+            end
+        end
+        if f.tabDisplay then
+            f.tabDisplay:ClearAllPoints()
+            f.tabDisplay:SetPoint("TOPLEFT", content, "TOPLEFT", per and 0 or 100, tabY)
+        end
+        if f.tabAppearance then
+            f.tabAppearance:ClearAllPoints()
+            f.tabAppearance:SetPoint("TOPLEFT", content, "TOPLEFT", per and 100 or 200, tabY)
+        end
+        local pageY = per and -48 or -26
+        local pages = { f.pageGeneral, f.pageDisplay, f.pageAppearance, f.pageModes }
+        local pi
+        for pi = 1, 4 do
+            pg = pages[pi]
+            if pg then
+                pg:ClearAllPoints()
+                pg:SetPoint("TOPLEFT", content, "TOPLEFT", 0, pageY)
+                pg:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT", 0, 0)
+            end
+        end
+        if f.renameRow then
+            if per then f.renameRow:Show() else f.renameRow:Hide() end
+        end
+    end
+    f.ApplyWindowMode = ApplyWindowMode
+    f.LayoutSettingsChrome = ApplyWindowMode
+
+    local function SelectWindowScope(scope)
+        local prev = UI.settingsScope or 0
+        UI.settingsScope = tonumber(scope) or 0
+        local b, i
+        if f.windowRailBtns then
+            for i = 0, 6 do
+                b = f.windowRailBtns[i]
+                if b then
+                    if i == UI.settingsScope then
+                        b:Disable()
+                    else
+                        b:Enable()
+                    end
+                end
+            end
+        end
+        ApplyWindowMode()
+        local tab = f.activeTab or "general"
+        if UI.settingsScope >= 1 then
+            if tab == "general" or tab == "modes" then tab = "display" end
+        elseif prev >= 1 then
+            tab = "general"
+        end
+        if f.SelectTab then
+            f.SelectTab(tab)
+        end
+        RefreshSettingWidgets()
+        if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+    end
+    f.SelectWindowScope = SelectWindowScope
+
+    local function RebuildWindowRail()
+        local i, btn
+        if f.windowRailBtns then
+            for i = 0, 6 do
+                btn = f.windowRailBtns[i]
+                if btn then btn:Hide() end
+            end
+        end
+        f.windowRailBtns = {}
+        local function MakeRailBtn(idx, y, text)
+            local b = CreateFrame("Button", nil, rail, "UIPanelButtonTemplate")
+            b:SetWidth(120)
+            b:SetHeight(18)
+            b:SetPoint("TOPLEFT", rail, "TOPLEFT", 2, y)
+            b:SetText(text)
+            b:SetScript("OnClick", function()
+                SelectWindowScope(idx)
+            end)
+            f.windowRailBtns[idx] = b
+            return b
+        end
+        MakeRailBtn(0, -18, "All windows")
+        for i = 1, 6 do
+            local label = (OM.GetWindowLabel and OM:GetWindowLabel(i)) or ("Window " .. i)
+            MakeRailBtn(i, -18 - (i * 32), label)
+        end
+        SelectWindowScope(UI.settingsScope or 0)
+    end
+    f.RebuildWindowRail = RebuildWindowRail
+    RebuildWindowRail()
+    ApplyWindowMode()
 
     local HEADER_PAD = 70
     local FOOTER_PAD = 40
     f.tabHeights = { general = 320, display = 260, appearance = 340, modes = 560 }
+    f.tabWidths = { general = 560, display = 620, appearance = 720, modes = 700 }
 
     local function MakeTabButton(label, x)
         local b = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
@@ -254,6 +440,45 @@ function UI:CreateSettingsFrame()
     local tabDisplay = MakeTabButton("Display", 100)
     local tabAppearance = MakeTabButton("Appearance", 200)
     local tabModes = MakeTabButton("Modes", 300)
+    f.tabGeneral = tabGeneral
+    f.tabDisplay = tabDisplay
+    f.tabAppearance = tabAppearance
+    f.tabModes = tabModes
+
+    local renameRow = CreateFrame("Frame", nil, content)
+    renameRow:SetPoint("TOPLEFT", content, "TOPLEFT", 0, 0)
+    renameRow:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, 0)
+    renameRow:SetHeight(20)
+    renameRow:Hide()
+    local renameFs = renameRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    renameFs:SetPoint("LEFT", renameRow, "LEFT", 0, 0)
+    renameFs:SetText("Rename window")
+    local renameBox = CreateFrame("EditBox", "GreedMeterRenameWindowBox", renameRow)
+    renameBox:SetPoint("LEFT", renameFs, "RIGHT", 8, 0)
+    renameBox:SetWidth(160)
+    renameBox:SetHeight(18)
+    renameBox:SetAutoFocus(false)
+    renameBox:SetFontObject(GameFontHighlightSmall)
+    renameBox:SetMaxLetters(24)
+    renameBox:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    renameBox:SetBackdropColor(0, 0, 0, 0.8)
+    renameBox:SetTextInsets(4, 4, 0, 0)
+    renameBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+    renameBox:SetScript("OnEnterPressed", function()
+        local scope = UI.settingsScope or 0
+        if scope >= 1 and OM.SetWindowLabel then
+            OM:SetWindowLabel(scope, this:GetText())
+        end
+        this:ClearFocus()
+        if f.RebuildWindowRail then f.RebuildWindowRail() end
+    end)
+    f.renameRow = renameRow
+    f.renameBox = renameBox
 
     local function StyleTab(btn, active)
         local fs = btn.GetFontString and btn:GetFontString() or nil
@@ -285,6 +510,10 @@ function UI:CreateSettingsFrame()
     f.pageModes = pageModes
 
     local function SelectTab(name)
+        local per = f.perWindowMode and true or false
+        if per and (name == "general" or name == "modes") then
+            name = "display"
+        end
         f.activeTab = name
         pageGeneral:Hide()
         pageDisplay:Hide()
@@ -307,10 +536,19 @@ function UI:CreateSettingsFrame()
             end
         end
         local body = (f.tabHeights and f.tabHeights[name]) or 280
-        local h = HEADER_PAD + body + FOOTER_PAD
+        local extra = per and 24 or 0
+        local h = HEADER_PAD + extra + body + FOOTER_PAD
         if h < 220 then h = 220 end
         if h > 920 then h = 920 end
         f:SetHeight(h)
+        local w = (f.tabWidths and f.tabWidths[name]) or (f.baseWidth or 720)
+        local specOn = OM.GetSetting and OM:GetSetting("windowSpecificSettings") == true
+        if specOn then
+            w = w + (f.railWidth or 128) + 8
+        end
+        if w < 420 then w = 420 end
+        if w > 900 then w = 900 end
+        f:SetWidth(w)
     end
     f.SelectTab = SelectTab
     tabGeneral:SetScript("OnClick", function() SelectTab("general") end)
@@ -335,6 +573,20 @@ function UI:CreateSettingsFrame()
         end
     end
     y = y - 24
+    local specCb = AddCheckbox(pageGeneral, "Window specific settings", 16, y, "windowSpecificSettings",
+        "Show a window list. All windows edits every meter. Window 1-6 edits only that meter.")
+    specCb.onToggle = function(checked)
+        if not checked then
+            UI.settingsScope = 0
+        end
+        if f.ApplyWindowMode then f.ApplyWindowMode() end
+        if f.RebuildWindowRail then f.RebuildWindowRail() end
+        if f.SelectTab then
+            f.SelectTab((not checked and "general") or (f.activeTab or "general"))
+        end
+    end
+    y = y - 24
+
     AddCheckbox(pageGeneral, "Confirm before reset", 16, y, "confirmReset", "Show a confirmation popup when pressing Reset")
     y = y - 24
     AddCheckbox(pageGeneral, "Party Join Reset", 16, y, "partyJoinReset",
@@ -592,6 +844,8 @@ function UI:CreateSettingsFrame()
     if UI.BuildSettingsExtraPages then
         UI.BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes)
     end
+    if f.RebuildWindowRail then f.RebuildWindowRail() end
+    if f.LayoutSettingsChrome then f.LayoutSettingsChrome() end
 
     SelectTab("general")
 
@@ -652,6 +906,9 @@ function UI:OnLoad()
     if self.ApplySettingsToFrames then
         self:ApplySettingsToFrames()
     end
+    if UI.ApplySoloVisibility then
+        UI.ApplySoloVisibility()
+    end
     -- If Hide out of combat is on and combat is over, begin the delayed hide
     if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
         if not OM.inCombat then
@@ -692,21 +949,67 @@ local function CancelOOCHide()
     end
 end
 
-local function ShowAllMeterFrames()
-    local i, f
+local function PlayerInGroup()
+    local nRaid = GetNumRaidMembers and GetNumRaidMembers() or 0
+    if nRaid and nRaid > 0 then return true end
+    local nParty = GetNumPartyMembers and GetNumPartyMembers() or 0
+    if nParty and nParty > 0 then return true end
+    return false
+end
+
+local function FrameHidesWhenSolo(f)
+    local prev = OM._readIndex
+    if f and f.layoutIndex then
+        OM._readIndex = f.layoutIndex
+    end
+    local on = OM.GetSetting and OM:GetSetting("hideWhenSolo") == true
+    OM._readIndex = prev
+    return on
+end
+
+local function ApplySoloVisibility()
     if not UI.frames then return end
+    local grouped = PlayerInGroup()
+    local i, f
     for i = 1, table.getn(UI.frames) do
         f = UI.frames[i]
         if f then
-            f:SetAlpha(1)
-            f:Show()
-            if UI.RefreshFrame then UI:RefreshFrame(f) end
+            if FrameHidesWhenSolo(f) and not grouped then
+                f._soloHidden = true
+                f:SetAlpha(1)
+                f:Hide()
+            elseif f._soloHidden then
+                f._soloHidden = nil
+                local hideOOC = OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true
+                if not (hideOOC and not OM.inCombat and not UI.oocForceVisible) then
+                    f:SetAlpha(1)
+                    f:Show()
+                    if UI.RefreshFrame then UI:RefreshFrame(f) end
+                end
+            end
         end
     end
-    if UI.mainFrame and not UI.mainFrame:IsShown() then
-        UI.mainFrame:SetAlpha(1)
-        UI.mainFrame:Show()
-        if UI.RefreshFrame then UI:RefreshFrame(UI.mainFrame) end
+end
+UI.ApplySoloVisibility = ApplySoloVisibility
+
+local function ShowAllMeterFrames()
+    local i, f
+    if not UI.frames then return end
+    local grouped = PlayerInGroup()
+    for i = 1, table.getn(UI.frames) do
+        f = UI.frames[i]
+        if f then
+            if FrameHidesWhenSolo(f) and not grouped then
+                f._soloHidden = true
+                f:SetAlpha(1)
+                f:Hide()
+            else
+                f._soloHidden = nil
+                f:SetAlpha(1)
+                f:Show()
+                if UI.RefreshFrame then UI:RefreshFrame(f) end
+            end
+        end
     end
 end
 
@@ -898,6 +1201,9 @@ end
 
 function UI:OnRosterUpdate()
     self:Refresh()
+    if UI.ApplySoloVisibility then
+        UI.ApplySoloVisibility()
+    end
 end
 
 -- ============================================================
@@ -1369,6 +1675,7 @@ local function MakeSettingCheckbox(parent, label, x, y, settingKey, tooltip, siz
         if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
         if cb.onToggle then cb.onToggle(checked) end
     end, size or 22, tooltip)
+    TrackSettingWidget(cb, "cb", settingKey)
     return cb
 end
 
@@ -1385,6 +1692,7 @@ local function MakeSlider(parent, label, x, y, settingKey, minV, maxV, step, wid
     slider:SetMinMaxValues(minV, maxV)
     slider:SetValueStep(step or 1)
     slider:SetValue(OM:GetSetting(settingKey) or minV)
+    TrackSettingWidget(slider, "slider", settingKey)
 
     local bg = slider:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints(slider)
@@ -1399,6 +1707,7 @@ local function MakeSlider(parent, label, x, y, settingKey, minV, maxV, step, wid
     local valText = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     valText:SetPoint("LEFT", slider, "RIGHT", 6, 0)
     valText:SetText(tostring(math.floor((OM:GetSetting(settingKey) or minV) + 0.5)))
+    slider._valText = valText
 
     slider:SetScript("OnValueChanged", function()
         local v = this:GetValue()
@@ -1828,6 +2137,12 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
             if CancelOOCHide then CancelOOCHide() end
             if ShowAllMeterFrames then ShowAllMeterFrames() end
         end
+    end
+    y = y - 22
+    local soloCb = MakeSettingCheckbox(pageDisplay, "Hide when solo", 4, y, "hideWhenSolo",
+        "Hide this meter while you are not in a party or raid.")
+    soloCb.onToggle = function()
+        if UI.ApplySoloVisibility then UI.ApplySoloVisibility() end
     end
     y = y - 22
     MakeSettingCheckbox(pageDisplay, "Self on top", 4, y, "selfOnTop",
@@ -2419,6 +2734,21 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     end
 
     local reset = UI.CreateButton and UI.CreateButton(f, "Reset Defaults", 110, 20, function()
+        local scope = UI.settingsScope or 0
+        if scope >= 1 then
+            if OM.ClearWindowSettings then OM:ClearWindowSettings(scope) end
+            local fr = UI.frames and UI.frames[scope]
+            if fr then
+                fr:ClearAllPoints()
+                fr:SetPoint("CENTER", UIParent, "CENTER", (scope - 1) * 30, (scope - 1) * 30)
+            end
+            if f.RebuildWindowRail then f.RebuildWindowRail() end
+            if f.RefreshSettingWidgets then f.RefreshSettingWidgets() end
+            if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+            if UI.Refresh then UI:Refresh() end
+            return
+        end
+        if OM.ClearAllWindowSettings then OM:ClearAllWindowSettings() end
         OM:SetSetting("columnConfig", nil)
         OM:SetSetting("modeColors", nil)
         OM:SetSetting("modeEnabled", nil)
