@@ -1874,6 +1874,7 @@ function UI:RefreshFrame(f)
     end
 
     if f.emptyLabel then
+        f.emptyLabel:SetText("")
         f.emptyLabel:Hide()
     end
 end

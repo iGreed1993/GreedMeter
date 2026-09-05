@@ -2582,11 +2582,8 @@ function Threat:RefreshFrame(f)
     end
 
     if f.emptyLabel then
-        if shown == 0 then
-            f.emptyLabel:Show()
-        else
-            f.emptyLabel:Hide()
-        end
+        f.emptyLabel:SetText("")
+        f.emptyLabel:Hide()
     end
 end
 

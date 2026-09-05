@@ -129,6 +129,15 @@ function OM:UpdateGroupRoster()
     -- Replacing the map drops stale binds (dismissed pets, players who left).
     local fresh = {}
     CollectUnitTokenPets(self, fresh)
+    -- Keep totem / SuperWoW "(Owner)" binds; unit-token rebuild drops them.
+    if self.stickyPets then
+        local pet, owner
+        for pet, owner in pairs(self.stickyPets) do
+            if owner and self.players[owner] then
+                AssignPet(self, pet, owner, fresh)
+            end
+        end
+    end
     self.heuristicPets = fresh
 end
 
@@ -187,4 +196,34 @@ function OM:ResolvePetOwner(petName)
     end
 
     return nil
+end
+
+function OM:SetPetOwner(petName, ownerName)
+    if not petName or not ownerName or petName == "" or ownerName == "" then
+        return
+    end
+    if self.players and self.players[petName] then
+        return
+    end
+    self.stickyPets = self.stickyPets or {}
+    self.stickyPets[petName] = ownerName
+    self.heuristicPets = self.heuristicPets or {}
+    AssignPet(self, petName, ownerName, self.heuristicPets)
+end
+
+function OM:IsTotemName(name)
+    if not name or type(name) ~= "string" then return false end
+    if string.find(name, "Totem") then return true end
+    return false
+end
+
+function OM:NoteTotemCast(caster, spell)
+    if not caster or not spell then return end
+    if not string.find(spell, "Totem") then return end
+    caster = string.gsub(caster, "^%s+", "")
+    caster = string.gsub(caster, "%s+$", "")
+    if caster == "You" or caster == "you" then
+        caster = UnitName("player")
+    end
+    self:SetPetOwner(spell, caster)
 end

@@ -99,7 +99,7 @@ local function NormalizeName(name)
     -- Single-character / pure-number captures are never unit names
     if string.len(name) <= 1 then return nil end
     if tonumber(name) then return nil end
-    -- SuperWoW: "PetName (OwnerName)" — record ownership for ResolveSource
+    -- SuperWoW: "PetName (OwnerName)" or "Searing Totem (Shaman)"
     local _, _, pet, owner = string.find(name, "^(.+) %((.+)%)$")
     if pet and owner then
         if OM.SetPetOwner then
@@ -108,6 +108,7 @@ local function NormalizeName(name)
             OM.heuristicPets = OM.heuristicPets or {}
             OM.heuristicPets[pet] = owner
         end
+        return pet
     end
     return name
 end
@@ -1114,23 +1115,22 @@ end
 
 function Parser:AddDamage(source, amount, spell, target, hitType, partialFlag, isPeriodic)
     EnsureInCombat()
-    -- Detect pet contribution before ResolveSource merges onto owner.
-    -- Only mark as pet when ownership is already known from unit tokens /
-    -- SuperWoW "Pet (Owner)" form — never invent a pet for random names.
     local isPet = false
-    if source then
-        if string.find(source, " %(.+%)$") then
+    local rawSource = source
+    if rawSource and string.find(rawSource, " %(.+%)$") then
+        isPet = true
+    end
+    local rawName = rawSource and NormalizeName(rawSource) or rawSource
+    local isTotem = rawName and OM.IsTotemName and OM:IsTotemName(rawName)
+    if rawName and rawName ~= "You" and rawName ~= "you" then
+        if OM.GetPetOwner and OM:GetPetOwner(rawName) then
             isPet = true
-        else
-            local raw = source
-            if raw ~= "You" and raw ~= "you" then
-                if OM.GetPetOwner and OM:GetPetOwner(raw) then
-                    isPet = true
-                elseif OM.heuristicPets and OM.heuristicPets[raw] then
-                    isPet = true
-                end
-            end
+        elseif OM.heuristicPets and OM.heuristicPets[rawName] then
+            isPet = true
         end
+    end
+    if isTotem and (not spell or spell == "" or spell == "Attack" or spell == "Auto Attack") then
+        spell = rawName
     end
 
     source = ResolveSource(source)
@@ -1149,7 +1149,7 @@ function Parser:AddDamage(source, amount, spell, target, hitType, partialFlag, i
         return
     end
 
-    if isPet then
+    if isPet and not isTotem then
         if OM.GetSetting and OM:GetSetting("mergePetDamage") then
             spell = "Pet: Damage"
         else
@@ -1289,6 +1289,12 @@ end
 function Parser:AddHealing(source, amount, spell, isAbsorb, target, hitType)
     EnsureInCombat()
     if not ModeEnabled("healing") then return end
+    local rawName = source and NormalizeName(source) or source
+    if rawName and OM.IsTotemName and OM:IsTotemName(rawName) then
+        if not spell or spell == "" then
+            spell = rawName
+        end
+    end
     source = ResolveSource(source)
     if not source or not amount or amount <= 0 then return end
     if not IsTracked(source) and not OM.players[source] then return end

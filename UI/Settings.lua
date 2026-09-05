@@ -910,11 +910,11 @@ function UI:OnLoad()
         UI.ApplySoloVisibility()
     end
     -- If Hide out of combat is on and combat is over, begin the delayed hide
-    if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
+    if UI.AnyFrameHidesOOC and UI.AnyFrameHidesOOC() then
         if not OM.inCombat then
             self.oocForceVisible = false
-            if StartOOCFadeOut then
-                StartOOCFadeOut()
+            if UI.StartOOCFadeOut then
+                UI.StartOOCFadeOut()
             end
         end
     end
@@ -957,14 +957,35 @@ local function PlayerInGroup()
     return false
 end
 
-local function FrameHidesWhenSolo(f)
+local function FrameSettingOn(f, key)
     local prev = OM._readIndex
     if f and f.layoutIndex then
         OM._readIndex = f.layoutIndex
     end
-    local on = OM.GetSetting and OM:GetSetting("hideWhenSolo") == true
+    local on = OM.GetSetting and OM:GetSetting(key) == true
     OM._readIndex = prev
     return on
+end
+
+local function FrameHidesWhenSolo(f)
+    return FrameSettingOn(f, "hideWhenSolo")
+end
+
+local function FrameHidesOOC(f)
+    return FrameSettingOn(f, "hideOutOfCombat")
+end
+
+local function AnyFrameHidesOOC()
+    if UI.frames then
+        local i, f
+        for i = 1, table.getn(UI.frames) do
+            f = UI.frames[i]
+            if f and FrameHidesOOC(f) then
+                return true
+            end
+        end
+    end
+    return OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true
 end
 
 local function ApplySoloVisibility()
@@ -980,8 +1001,7 @@ local function ApplySoloVisibility()
                 f:Hide()
             elseif f._soloHidden then
                 f._soloHidden = nil
-                local hideOOC = OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true
-                if not (hideOOC and not OM.inCombat and not UI.oocForceVisible) then
+                if not (FrameHidesOOC(f) and not OM.inCombat and not UI.oocForceVisible) then
                     f:SetAlpha(1)
                     f:Show()
                     if UI.RefreshFrame then UI:RefreshFrame(f) end
@@ -1025,7 +1045,43 @@ local function HideAllMeterFrames()
     end
 end
 
+local function HideOOCMeterFrames()
+    local i, f
+    if not UI.frames then return end
+    for i = 1, table.getn(UI.frames) do
+        f = UI.frames[i]
+        if f and FrameHidesOOC(f) then
+            f._oocHidden = true
+            f:SetAlpha(1)
+            f:Hide()
+        end
+    end
+end
+
+local function ShowOOCMeterFrames()
+    local i, f
+    if not UI.frames then return end
+    local grouped = PlayerInGroup()
+    for i = 1, table.getn(UI.frames) do
+        f = UI.frames[i]
+        if f and (f._oocHidden or FrameHidesOOC(f)) then
+            if FrameHidesWhenSolo(f) and not grouped then
+                f._soloHidden = true
+                f._oocHidden = nil
+                f:SetAlpha(1)
+                f:Hide()
+            else
+                f._oocHidden = nil
+                f:SetAlpha(1)
+                f:Show()
+                if UI.RefreshFrame then UI:RefreshFrame(f) end
+            end
+        end
+    end
+end
+
 local function StartOOCFadeOut()
+    if not AnyFrameHidesOOC() then return end
     CancelOOCHide()
     if not UI._oocFadeFrame then
         UI._oocFadeFrame = CreateFrame("Frame")
@@ -1039,13 +1095,12 @@ local function StartOOCFadeOut()
             this:SetScript("OnUpdate", nil)
             return
         end
-        -- Combat started or force-show cancelled the hide
         if OM.inCombat or UI.oocForceVisible then
             CancelOOCHide()
-            ShowAllMeterFrames()
+            ShowOOCMeterFrames()
             return
         end
-        if not (OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true) then
+        if not AnyFrameHidesOOC() then
             CancelOOCHide()
             return
         end
@@ -1055,7 +1110,7 @@ local function StartOOCFadeOut()
         end
         local t = UI._oocFadeElapsed - DELAY
         if t >= FADE then
-            HideAllMeterFrames()
+            HideOOCMeterFrames()
             CancelOOCHide()
             return
         end
@@ -1064,7 +1119,7 @@ local function StartOOCFadeOut()
         local i, f
         for i = 1, table.getn(UI.frames) do
             f = UI.frames[i]
-            if f and f:IsShown() then
+            if f and f:IsShown() and FrameHidesOOC(f) then
                 f:SetAlpha(a)
             end
         end
@@ -1072,18 +1127,22 @@ local function StartOOCFadeOut()
     UI._oocFadeFrame:Show()
 end
 
+UI.AnyFrameHidesOOC = AnyFrameHidesOOC
+UI.StartOOCFadeOut = StartOOCFadeOut
+UI.ShowOOCMeterFrames = ShowOOCMeterFrames
+
 function UI:OnCombatStart()
     CancelOOCHide()
     UI.oocForceVisible = false
-    if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
-        ShowAllMeterFrames()
+    if AnyFrameHidesOOC() then
+        ShowOOCMeterFrames()
     end
     self:Refresh()
 end
 
 function UI:OnCombatEnd()
     self:Refresh()
-    if OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true then
+    if AnyFrameHidesOOC() then
         if not UI.oocForceVisible then
             StartOOCFadeOut()
         end
@@ -1211,7 +1270,7 @@ end
 -- ============================================================
 
 function UI:ToggleAllFrames()
-    local hideOOC = OM.GetSetting and OM:GetSetting("hideOutOfCombat") == true
+    local hideOOC = AnyFrameHidesOOC and AnyFrameHidesOOC()
     local inCombat = OM.inCombat and true or false
 
     -- With Hide out of combat: minimap forces show/hide outside combat.
@@ -1220,24 +1279,21 @@ function UI:ToggleAllFrames()
     if hideOOC and not inCombat then
         CancelOOCHide()
         if self.oocForceVisible then
-            -- Second click: leave force-show, hide, resume OOC auto-hide
             self.oocForceVisible = false
-            HideAllMeterFrames()
+            HideOOCMeterFrames()
         else
             local anyShown = false
             local i, f
             for i = 1, table.getn(self.frames) do
                 f = self.frames[i]
-                if f and f:IsShown() then anyShown = true break end
+                if f and f:IsShown() and FrameHidesOOC(f) then anyShown = true break end
             end
             if anyShown then
-                -- Visible (e.g. still in fade delay): hide and stay on auto OOC
                 self.oocForceVisible = false
-                HideAllMeterFrames()
+                HideOOCMeterFrames()
             else
-                -- Forced visible while out of combat
                 self.oocForceVisible = true
-                ShowAllMeterFrames()
+                ShowOOCMeterFrames()
             end
         end
         if self.SaveAllFrameLayouts then
@@ -2126,7 +2182,7 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     y = y - 22
 
     local hideOOCCb = MakeSettingCheckbox(pageDisplay, "Hide out of combat", 4, y, "hideOutOfCombat",
-        "Hide all meter windows ~5 seconds after combat ends (short fade). They reappear instantly when combat starts. Minimap button can force show/hide while this is on.")
+        "Hide this meter ~5 seconds after combat ends (short fade). It reappears instantly when combat starts. Minimap button can force show/hide while this is on.")
     hideOOCCb.onToggle = function(checked)
         if checked then
             UI.oocForceVisible = false
@@ -2134,8 +2190,22 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
                 StartOOCFadeOut()
             end
         else
-            if CancelOOCHide then CancelOOCHide() end
-            if ShowAllMeterFrames then ShowAllMeterFrames() end
+            if not AnyFrameHidesOOC() and CancelOOCHide then
+                CancelOOCHide()
+            end
+            if ShowOOCMeterFrames then
+                ShowOOCMeterFrames()
+            end
+            local scope = UI.settingsScope or 0
+            local fr = (scope >= 1 and UI.frames and UI.frames[scope]) or nil
+            if fr and fr._oocHidden then
+                fr._oocHidden = nil
+                if not (FrameHidesWhenSolo(fr) and not PlayerInGroup()) then
+                    fr:SetAlpha(1)
+                    fr:Show()
+                    if UI.RefreshFrame then UI:RefreshFrame(fr) end
+                end
+            end
         end
     end
     y = y - 22

@@ -2164,6 +2164,19 @@ H.getPlayerName = function() return ST.playerName or UnitName("player") end
 
 local function ParseMessage(event, message)
     if not message or message == "" then return end
+    if OM.NoteTotemCast then
+        local _, _, youSpell = string.find(message, "^You cast (.+)%.?$")
+        if youSpell and string.find(youSpell, "Totem") and not string.find(youSpell, " on ") then
+            OM:NoteTotemCast(UnitName("player"), youSpell)
+        else
+            local _, _, src, spell = string.find(message, "^(.+) casts (.+)%.?$")
+            if src and spell and string.find(spell, "Totem") and not string.find(spell, " on ") then
+                if src ~= "You" and not string.find(src, "^Your ") and (OM.players and OM.players[src]) then
+                    OM:NoteTotemCast(src, spell)
+                end
+            end
+        end
+    end
 
     -- When Nampower owns damage/heal/miss, skip chat paths that would double-count.
     -- Interrupt / dispel / CC chat parsers still run below.

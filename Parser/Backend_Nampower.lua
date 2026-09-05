@@ -332,9 +332,33 @@ local function ResolveAttacker(guid, isSelf)
         return UnitName("player")
     end
     local name = NameFromGuidOrPet(guid)
+    local ownerSW = nil
+    if guid and type(UnitName) == "function" then
+        local ok, oname = pcall(UnitName, tostring(guid) .. "owner")
+        if ok and oname and oname ~= "" then
+            ownerSW = oname
+        end
+    end
+    if name and OM.IsTotemName and OM:IsTotemName(name) then
+        local owner = ownerSW or OwnerNameForGuid(guid) or (OM.GetPetOwner and OM:GetPetOwner(name))
+        if owner then
+            if OM.SetPetOwner then OM:SetPetOwner(name, owner) end
+            RegisterGuid(guid, name, owner)
+            return name
+        end
+    elseif (not name) and ownerSW then
+        local label = "Totem"
+        if type(UnitName) == "function" then
+            local okn, n2 = pcall(UnitName, guid)
+            if okn and n2 and n2 ~= "" then label = n2 end
+        end
+        if OM.SetPetOwner then OM:SetPetOwner(label, ownerSW) end
+        RegisterGuid(guid, label, ownerSW)
+        return label
+    end
     if name then return name end
     -- Tracked pet GUID but name unknown → use owner name with pet tag via heuristic
-    local owner = OwnerNameForGuid(guid)
+    local owner = OwnerNameForGuid(guid) or ownerSW
     if owner then
         -- Synthetic pet label so AddDamage marks isPet and merges to owner
         local label = "Pet"
