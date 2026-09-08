@@ -104,9 +104,11 @@ local function NormalizeName(name)
     if pet and owner then
         if OM.SetPetOwner then
             OM:SetPetOwner(pet, owner)
-        else
-            OM.heuristicPets = OM.heuristicPets or {}
-            OM.heuristicPets[pet] = owner
+        end
+        -- Log already named the owner ("Bear (Alice)"). Use it so two
+        -- default-named pets in the group are not collapsed onto one hunter.
+        if OM.players and OM.players[owner] then
+            return owner
         end
         return pet
     end

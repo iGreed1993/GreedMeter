@@ -177,6 +177,9 @@ local function ApplyFrameBackgroundOpacity(f)
     end
     f:SetBackdropBorderColor(0.35, 0.35, 0.35, borderA)
     f._gmBgOpacityPct = pct
+    if UI.ApplyHeaderBarColor then
+        UI.ApplyHeaderBarColor(f)
+    end
 end
 UI.ApplyFrameBackgroundOpacity = ApplyFrameBackgroundOpacity
 
@@ -187,6 +190,86 @@ local function ApplyTitleColor(f)
     f.title:SetTextColor(c[1] or 1, c[2] or 0.82, c[3] or 0)
 end
 UI.ApplyTitleColor = ApplyTitleColor
+
+local function EnsureHeaderBar(f)
+    if not f or f.headerBg then return end
+    local strip = CreateFrame("Frame", nil, f)
+    strip:SetPoint("TOPLEFT", f, "TOPLEFT", 3, -3)
+    strip:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -3)
+    strip:SetHeight(18)
+    strip:EnableMouse(false)
+    local lvl = f:GetFrameLevel() or 1
+    strip:SetFrameLevel(lvl)
+    local tex = strip:CreateTexture(nil, "BACKGROUND")
+    tex:SetAllPoints(strip)
+    f.headerStrip = strip
+    f.headerBg = tex
+end
+
+local function ColorClose(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return false end
+    local i
+    for i = 1, 3 do
+        local da = (a[i] or 0) - (b[i] or 0)
+        if da < 0 then da = -da end
+        if da > 0.02 then return false end
+    end
+    return true
+end
+
+local function HeaderStripHeight(f)
+    -- 2px past the lowest header control / title, measured from the strip's
+    -- top inset (3px inside the frame).
+    local top = f.GetTop and f:GetTop()
+    local lowest = nil
+    local function consider(widget)
+        if not widget or not widget.GetBottom then return end
+        if widget.IsShown and not widget:IsShown() then return end
+        local b = widget:GetBottom()
+        if b and (not lowest or b < lowest) then
+            lowest = b
+        end
+    end
+    consider(f.title)
+    consider(f.resetBtn)
+    consider(f.announceBtn)
+    consider(f.nameBtn)
+    consider(f.modeBtn)
+    consider(f.segBtn)
+    consider(f.addBtn)
+    consider(f.removeBtn)
+    if top and lowest then
+        local h = (top - 3) - lowest + 2
+        if h < 12 then h = 12 end
+        if h > 48 then h = 48 end
+        return h
+    end
+    local fallback = (f.headerHeight or 18) - 4
+    if fallback < 16 then fallback = 16 end
+    return fallback
+end
+
+local function ApplyHeaderBarColor(f)
+    if not f then return end
+    EnsureHeaderBar(f)
+    if not f.headerBg or not f.headerStrip then return end
+    f.headerStrip:SetHeight(HeaderStripHeight(f))
+    local c = OM.GetSetting and OM:GetSetting("headerBgColor")
+    if type(c) ~= "table" then c = { 0, 0, 0 } end
+    local pct = 0
+    if OM.GetSetting then
+        pct = tonumber(OM:GetSetting("headerBarOpacity")) or 0
+    end
+    if pct < 0 then pct = 0 end
+    if pct > 100 then pct = 100 end
+    if pct <= 0 then
+        f.headerStrip:Hide()
+        return
+    end
+    f.headerBg:SetTexture(c[1] or 0, c[2] or 0, c[3] or 0, pct / 100)
+    f.headerStrip:Show()
+end
+UI.ApplyHeaderBarColor = ApplyHeaderBarColor
 
 local function SafeStartMoving(f)
     if not f then return end
@@ -913,6 +996,8 @@ local f = CreateFrame("Frame", name, UIParent)
     title:SetPoint("TOP", f, "TOP", 0, -4)
     title:SetText("Damage")
     f.title = title
+    EnsureHeaderBar(f)
+    ApplyHeaderBarColor(f)
 
     -- Duration is tooltip-only now (no header display)
     local durationLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -1300,6 +1385,7 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
     end
 
     ApplyTitleColor(f)
+    ApplyHeaderBarColor(f)
     ApplyHeaderButtonLabels(f)
     ApplyHeaderButtonVisibility(f)
     -- Size buttons to their labels before deciding one-row vs two-row
@@ -1547,6 +1633,7 @@ function UI:ApplyHeaderLayout(f, hideTitle, duration)
     end
 
     f.headerHeight = headerH
+    ApplyHeaderBarColor(f)
     self:LayoutBars(f)
 end
 

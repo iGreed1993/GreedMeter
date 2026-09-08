@@ -2377,7 +2377,23 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
     MakeLabeledSwatch("Text color", 200, "barTextColor", { 1.00, 1.00, 1.00 })
     MakeLabeledSwatch("Title color", 340, "titleColor", { 1.00, 0.82, 0.00 })
     MakeLabeledSwatch("Background color", 500, "windowBgColor", { 0, 0, 0 })
-    y = y - 36
+    y = y - 22
+    local hbFs = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    hbFs:SetPoint("TOPLEFT", pageAppearance, "TOPLEFT", 4, y)
+    hbFs:SetText("Title bar color")
+    local hbSw = MakeColorSwatch(pageAppearance, 20, 14)
+    hbSw:SetPoint("LEFT", hbFs, "RIGHT", 6, 0)
+    local hbCol = OM:GetSetting("headerBgColor") or { 0, 0, 0 }
+    hbSw:SetColor(hbCol[1] or 0, hbCol[2] or 0, hbCol[3] or 0)
+    hbSw:SetScript("OnClick", function()
+        ShowPalette(hbSw, "headerBgColor", function(r, g, b)
+            OM:SetSetting("headerBgColor", { r, g, b })
+            hbSw:SetColor(r, g, b)
+            if UI.ApplySettingsToFrames then UI:ApplySettingsToFrames() end
+            if UI.Refresh then UI:Refresh() end
+        end)
+    end)
+    y = y - 22
 
     -- ---- Custom media import ----
     local importHdr = pageAppearance:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -2651,9 +2667,10 @@ local function BuildSettingsExtraPages(f, pageDisplay, pageAppearance, pageModes
 
     MakeSlider(pageAppearance, "Bar spacing", 4, y, "barSpacing", 0, 16, 1, 140)
     MakeSlider(pageAppearance, "Text spacing", 200, y, "textSpacing", -16, 16, 1, 140)
-    MakeSlider(pageAppearance, "Class icon position", 400, y, "classIconOffset", -32, 32, 1, 140)
+    MakeSlider(pageAppearance, "Title bar opacity", 400, y, "headerBarOpacity", 0, 100, 1, 140)
     y = y - 36
     MakeSlider(pageAppearance, "Class icon size", 4, y, "classIconSize", 8, 32, 1, 140)
+    MakeSlider(pageAppearance, "Class icon position", 200, y, "classIconOffset", -32, 32, 1, 140)
     y = y - 40
     if f.tabHeights then
         f.tabHeights.appearance = math.max(120, (-y) + 16)

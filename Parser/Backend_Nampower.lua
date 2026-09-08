@@ -242,8 +242,12 @@ local function RegisterGuid(guid, name, ownerName)
         petGuidToOwner[key] = ownerName
         petGuidToOwner[guid] = ownerName
         if name and name ~= "" then
-            OM.heuristicPets = OM.heuristicPets or {}
-            OM.heuristicPets[name] = ownerName
+            local generic = name == "Pet" or name == "Bear" or name == "Wolf" or name == "Cat"
+                or name == "Imp" or name == "Voidwalker" or name == "Succubus" or name == "Felhunter"
+            if not generic then
+                OM.heuristicPets = OM.heuristicPets or {}
+                OM.heuristicPets[name] = ownerName
+            end
         end
     end
 end
@@ -365,8 +369,10 @@ local function ResolveAttacker(guid, isSelf)
         if UnitExists("pet") and OwnerNameForGuid(guid) == UnitName("player") then
             label = UnitName("pet") or "Pet"
         end
-        OM.heuristicPets = OM.heuristicPets or {}
-        OM.heuristicPets[label] = owner
+        if label and label ~= "Pet" then
+            OM.heuristicPets = OM.heuristicPets or {}
+            OM.heuristicPets[label] = owner
+        end
         return label
     end
     if isSelf then return UnitName("player") end

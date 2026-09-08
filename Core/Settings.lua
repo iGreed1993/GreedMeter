@@ -17,6 +17,7 @@ OM.defaults = {
     titleColor = { 1.00, 0.82, 0.00 },
     barTextColor = { 1.00, 1.00, 1.00 },
     windowBgColor = { 0, 0, 0 },
+    headerBgColor = { 0, 0, 0 }, -- title bar strip; same as window bg by default
     barSpacing = 1, -- extra pixels between bars
     textSpacing = 0, -- vertical offset of bar text from bar center
     classIconOffset = 0, -- horizontal class icon shift
@@ -51,6 +52,7 @@ OM.defaults = {
     testMode = false,
     combatLogRangeSetting = 200,
     frameOpacity = 100,
+    headerBarOpacity = 0, -- 0 = no visible title bar strip
     confirmReset = false,
     partyJoinReset = false, -- reset when joining a party or raid
     partyLeaveReset = false, -- reset when leaving a party or raid
@@ -167,7 +169,7 @@ function OM:GetSetting(key)
             v = self.defaults[key]
         end
     end
-    if key == "frameOpacity" or key == "barHeight" or key == "fontSize" or key == "announceLines"
+    if key == "frameOpacity" or key == "headerBarOpacity" or key == "barHeight" or key == "fontSize" or key == "announceLines"
         or key == "classIconSize" or key == "classIconOffset" or key == "barSpacing" or key == "textSpacing" then
         local n = tonumber(v)
         if n ~= nil then return n end
