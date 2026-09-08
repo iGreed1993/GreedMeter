@@ -234,7 +234,13 @@ frame:SetScript("OnEvent", function()
         OM:ApplyCombatLogRange(range)
         OM:UpdateGroupRoster()
         OM._partyResetGroupType = CurrentGroupType()
-        OM:Fire("OnLoad")
+        if not OM._loadedOnce then
+            OM._loadedOnce = true
+            OM._varsReady = true
+            OM:Fire("OnLoad")
+        else
+            OM:Fire("OnZone")
+        end
         if OM.ShowSuperWoWPromptIfNeeded then
             OM:ShowSuperWoWPromptIfNeeded()
         end

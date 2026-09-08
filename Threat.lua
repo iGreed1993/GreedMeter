@@ -2001,6 +2001,33 @@ function Threat:AnyFrameInTankView()
     return false
 end
 
+function Threat:RefreshOpenFrames()
+    if not UI or not UI.frames then return end
+    local i, f
+    for i = 1, table.getn(UI.frames) do
+        f = UI.frames[i]
+        if f and f:IsShown() and IsThreatModeKey(f.mode) then
+            Threat:RefreshFrame(f)
+        end
+    end
+end
+
+local function EstimateSignature()
+    local act, tgt = 0, ""
+    if UI and UI.GetSegmentData then
+        local seg = UI.GetSegmentData("current")
+        if seg then
+            act = seg.lastActivityTime or seg.damage or 0
+        end
+    end
+    if UnitExists("target") then
+        tgt = UnitName("target") or ""
+    end
+    local pet = (OM.GetSetting and OM:GetSetting("showPetThreat") == true) and 1 or 0
+    local tank = (OM.GetSetting and OM:GetSetting("petAsTank") == true) and 1 or 0
+    return tostring(act) .. "|" .. tgt .. "|" .. tostring(pet) .. tostring(tank)
+end
+
 -- ============================================================
 -- UI hooks
 -- ============================================================
@@ -3070,8 +3097,8 @@ eventFrame:SetScript("OnEvent", function()
     if event == "CHAT_MSG_ADDON" then
         if arg2 and string.find(arg2, THREAT_API_PREFIX, 1, true) then
             if ParseThreatPacket(arg2) then
-                if Threat:AnyFrameInThreatMode() and UI.Refresh then
-                    UI:Refresh()
+                if Threat:AnyFrameInThreatMode() then
+                    Threat:RefreshOpenFrames()
                 end
             end
         end
@@ -3083,8 +3110,8 @@ eventFrame:SetScript("OnEvent", function()
         Threat.targetName = UnitName("target")
         RememberHostileTarget()
         InvalidateThreatCaches()
-        if Threat:AnyFrameInThreatMode() and UI.Refresh then
-            UI:Refresh()
+        if Threat:AnyFrameInThreatMode() then
+            Threat:RefreshOpenFrames()
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         -- Leaving combat: drop the accumulated enemy list and flee flags
@@ -3102,8 +3129,8 @@ eventFrame:SetScript("OnEvent", function()
                 ClearTankModeTable()
             end
             Threat.usingApi = false
-            if Threat:AnyFrameInThreatMode() and UI.Refresh then
-                UI:Refresh()
+            if Threat:AnyFrameInThreatMode() then
+                Threat:RefreshOpenFrames()
             end
         end
     elseif event == "CHAT_MSG_MONSTER_EMOTE"
@@ -3311,36 +3338,15 @@ eventFrame:SetScript("OnUpdate", function()
     if not OM:GetSetting("enableThreatMode") then return end
     if not Threat:AnyFrameInThreatMode() then return end
 
-    elapsed = elapsed + arg1
-    if elapsed < 0.25 then return end
-    elapsed = 0
-
-    -- Test mode: keep showing the fake lists; do not query API or estimate
-    if OM:GetSetting("testMode") == true then
-        if not Threat.testDataActive then
-            Threat:LoadTestData()
-        end
-        if UI.Refresh then UI:Refresh() end
-        return
-    elseif Threat.testDataActive then
-        Threat:ClearTestData()
-    end
-
-    local now = GetTime()
-    -- Target in combat counts as a fight session even if you are not flagged
-    local targetCombat = UnitExists("target") and UnitAffectingCombat and UnitAffectingCombat("target")
-    local groupCombat = IsGroupInCombat() or (targetCombat and true or false)
-    local hostileTarget = HasHostileTarget()
-    local apiTarget = IsThreatApiTarget()
-
-    -- Aggro holder changed → rebuild threat list ranking immediately
+    -- Aggro swap is cheap and should redraw threat windows immediately
     local liveAggro = nil
-    if UnitExists("target") and UnitExists("targettarget") and not UnitIsDead("targettarget") then
-        liveAggro = UnitName("targettarget")
+    if UnitExists("target") and UnitExists("targettarget") then
+        if not (UnitIsDead and UnitIsDead("targettarget")) then
+            liveAggro = UnitName("targettarget")
+        end
     end
     if liveAggro ~= Threat._lastAggroName then
         Threat._lastAggroName = liveAggro
-        -- Update tank flags on the live table so any open window re-sorts
         local n, d
         for n, d in pairs(Threat.threats) do
             if d and not d.isPull then
@@ -3351,9 +3357,36 @@ eventFrame:SetScript("OnUpdate", function()
             Threat.tankName = liveAggro
         end
         InvalidateThreatCaches()
+        UpdateThreatWarnings()
+        Threat:RefreshOpenFrames()
     end
 
-    -- Group combat session: start/stop with the party/target, not only local regen.
+    elapsed = elapsed + arg1
+    if elapsed < 0.5 then return end
+    elapsed = 0
+
+    if OM:GetSetting("testMode") == true then
+        if not Threat.testDataActive then
+            Threat:LoadTestData()
+        end
+        Threat:RefreshOpenFrames()
+        return
+    elseif Threat.testDataActive then
+        Threat:ClearTestData()
+    end
+
+    local now = GetTime()
+    local playerCombat = UnitAffectingCombat and UnitAffectingCombat("player")
+    local targetCombat = UnitExists("target") and UnitAffectingCombat and UnitAffectingCombat("target")
+    local groupCombat
+    if playerCombat or targetCombat then
+        groupCombat = true
+    else
+        groupCombat = IsGroupInCombat()
+    end
+    local hostileTarget = HasHostileTarget()
+    local apiTarget = IsThreatApiTarget()
+
     if groupCombat and not Threat.groupCombat then
         Threat.groupCombat = true
         local k
@@ -3365,12 +3398,12 @@ eventFrame:SetScript("OnUpdate", function()
         end
         Threat.currentTargetKey = nil
         Threat.usingApi = false
+        Threat._lastEstSig = nil
         InvalidateThreatCaches()
     elseif not groupCombat and Threat.groupCombat then
         Threat.groupCombat = false
     end
 
-    -- Live server threat API
     if apiTarget then
         if (now - Threat.lastQuery) >= Threat.queryInterval then
             Threat.lastQuery = now
@@ -3380,24 +3413,23 @@ eventFrame:SetScript("OnUpdate", function()
 
     if Threat.usingApi and (now - Threat.lastApiTime) > Threat.apiTimeout then
         Threat.usingApi = false
+        Threat._lastEstSig = nil
     end
 
     if not Threat.usingApi then
-        if hostileTarget then
-            -- Fallback estimate when API is silent (trash, no response, etc.)
-            BuildEstimatedThreat()
-        elseif IsInGroup() and (groupCombat or Threat.groupCombat) then
-            BuildEstimatedOverallOnly()
+        local sig = EstimateSignature()
+        if sig ~= Threat._lastEstSig then
+            Threat._lastEstSig = sig
+            if hostileTarget then
+                BuildEstimatedThreat()
+            elseif IsInGroup() and (groupCombat or Threat.groupCombat) then
+                BuildEstimatedOverallOnly()
+            end
         end
-    -- When API is live, keep the last snapshots even without a local target.
-    -- Do not overwrite with estimates until the API times out.
     end
 
     UpdateThreatWarnings()
-
-    if UI.Refresh then
-        UI:Refresh()
-    end
+    Threat:RefreshOpenFrames()
 end)
 
 -- ============================================================

@@ -41,8 +41,76 @@ local ShowBarTooltip = UI.ShowBarTooltip
 -- ============================================================
 -- Manual clamp after drag/restore/save. SetClampedToScreen + StartMoving
 -- can crash some 1.12 clients.
+local function IsPfuiChatDock(f)
+    if not f or not f.GetNumPoints then return false end
+    if not pfUI or not pfUI.chat or not pfUI.chat.right then return false end
+    local dock = pfUI.chat.right
+    local n = f:GetNumPoints() or 0
+    local i
+    for i = 1, n do
+        local ok, _, rel = pcall(function()
+            return f:GetPoint(i)
+        end)
+        if ok and rel == dock then
+            return true
+        end
+    end
+    return false
+end
+UI.IsPfuiChatDock = IsPfuiChatDock
+
+local function RelayoutFrame(f)
+    if not f or not UI.LayoutBars then return end
+    UI:LayoutBars(f)
+    if UI.RefreshFrame then
+        UI:RefreshFrame(f)
+    end
+end
+UI.RelayoutFrame = RelayoutFrame
+
+-- SetAllPoints (pfUI dock) can stretch a frame without SetHeight.
+-- GetHeight then stays at the last explicit size; top-bottom is the real span.
+local function EffectiveFrameSize(f)
+    local w = (f and f.GetWidth and f:GetWidth()) or 0
+    local h = (f and f.GetHeight and f:GetHeight()) or 0
+    if f and f.GetLeft and f.GetRight then
+        local left, right = f:GetLeft(), f:GetRight()
+        if left and right then
+            local span = right - left
+            if span > w then w = span end
+        end
+    end
+    if f and f.GetTop and f.GetBottom then
+        local top, bottom = f:GetTop(), f:GetBottom()
+        if top and bottom then
+            local span = top - bottom
+            if span > h then h = span end
+        end
+    end
+    return w, h
+end
+UI.EffectiveFrameSize = EffectiveFrameSize
+
+local function RememberFrameSize(f)
+    if not f then return end
+    local w, h = EffectiveFrameSize(f)
+    f._gmLastW = w
+    f._gmLastH = h
+end
+
+local function RelayoutIfSizeChanged(f)
+    if not f then return end
+    local w, h = EffectiveFrameSize(f)
+    if not w or not h or w <= 0 or h <= 0 then return end
+    if f._gmLastW == w and f._gmLastH == h then return end
+    RememberFrameSize(f)
+    RelayoutFrame(f)
+end
+UI.RelayoutIfSizeChanged = RelayoutIfSizeChanged
+
 local function ClampFrameToScreen(f)
     if not f or not f.GetLeft then return end
+    if IsPfuiChatDock(f) then return end
     local left = f:GetLeft()
     local right = f:GetRight()
     local top = f:GetTop()
@@ -138,7 +206,9 @@ local function SafeStopMoving(f)
         f:StopMovingOrSizing()
     end
     f._greedMeterDragging = nil
-    ClampFrameToScreen(f)
+    if not IsPfuiChatDock(f) then
+        ClampFrameToScreen(f)
+    end
 end
 
 function UI:SaveAllFrameLayouts()
@@ -165,6 +235,14 @@ function UI:SaveAllFrameLayouts()
                 end)
                 if ok then
                     point, relativePoint, x, y = p1, p2, px, py
+                end
+                -- Docked to pfUI chat: keep last free-floating point so a later
+                -- restore does not pin the meter over chat.
+                if IsPfuiChatDock(f) then
+                    point = prev.point or "CENTER"
+                    relativePoint = prev.relativePoint or "CENTER"
+                    x = prev.x or 0
+                    y = prev.y or 0
                 end
                 entry = {
                     point = point or prev.point or "CENTER",
@@ -204,15 +282,22 @@ function UI:ApplySavedLayout(f, index)
     local layoutDB = OM:GetLayoutDB()
     local saved = layoutDB and layoutDB.frames and layoutDB.frames[index]
     if not saved then return false end
-    if saved.width then f:SetWidth(saved.width) end
-    if saved.height then f:SetHeight(saved.height) end
     if saved.mode then f.mode = saved.mode end
     if saved.segment == "current" or saved.segment == "overall" then
         f.segment = saved.segment
     end
+    if IsPfuiChatDock(f) then
+        return true
+    end
+    if saved.width then f:SetWidth(saved.width) end
+    if saved.height then f:SetHeight(saved.height) end
     f:ClearAllPoints()
     f:SetPoint(saved.point or "CENTER", UIParent, saved.relativePoint or "CENTER", saved.x or 0, saved.y or 0)
     ClampFrameToScreen(f)
+    RememberFrameSize(f)
+    if f.bars and f.bars[1] then
+        RelayoutFrame(f)
+    end
     return true
 end
 
@@ -648,8 +733,14 @@ function UI:CreateMeterFrame(isPrimary, copyFrom)
     local fw, fh = 240, 280
     -- New windows copy the source window size
     if copyFrom then
-        fw = copyFrom:GetWidth() or fw
-        fh = copyFrom:GetHeight() or fh
+        if EffectiveFrameSize then
+            local cw, ch = EffectiveFrameSize(copyFrom)
+            fw = cw or copyFrom:GetWidth() or fw
+            fh = ch or copyFrom:GetHeight() or fh
+        else
+            fw = copyFrom:GetWidth() or fw
+            fh = copyFrom:GetHeight() or fh
+        end
     elseif OM.GetLayoutDB then
         local layoutDB = OM:GetLayoutDB()
         local saved = layoutDB and layoutDB.frames and layoutDB.frames[layoutIndex]
@@ -710,6 +801,7 @@ local f = CreateFrame("Frame", name, UIParent)
         local offset = (id - 1) * 30
         f:SetPoint("CENTER", UIParent, "CENTER", offset, offset)
     end
+    RememberFrameSize(f)
 
     -- Mouse wheel scroll through the list
     f:EnableMouseWheel(true)
@@ -776,12 +868,12 @@ local f = CreateFrame("Frame", name, UIParent)
         if newH > MAX_FRAME_HEIGHT then newH = MAX_FRAME_HEIGHT end
         f:SetWidth(newW)
         f:SetHeight(newH)
+        RememberFrameSize(f)
         if UI.ApplyHeaderLayout then
             local ht = OM.GetSetting and OM:GetSetting("hideTitle") == true
             UI:ApplyHeaderLayout(f, ht, 0)
         end
-        UI:LayoutBars(f)
-        UI:RefreshFrame(f)
+        RelayoutFrame(f)
     end)
     f.resizeGrip = grip
     grip:Hide()
@@ -1463,11 +1555,12 @@ function UI:LayoutBars(f)
     if not f or not f.bars then return end
     local barH = (GetBarHeight and GetBarHeight()) or 16
     local fontSize = (GetFontSize and GetFontSize()) or 11
-    local width = (f:GetWidth() or 200) - 12
+    local fw, fh = EffectiveFrameSize(f)
+    local width = (fw or 200) - 12
     if width < 40 then width = 40 end
     local headerH = f.headerHeight or HEADER_HEIGHT
     local footer = EffectiveFooterHeight()
-    local avail = f:GetHeight() - headerH - TextClearance() - footer - 4
+    local avail = (fh or 0) - headerH - TextClearance() - footer - 4
     if avail < barH then avail = barH end
     local gap = BarGap()
     local fit = math.floor(avail / (barH + gap))
@@ -1481,6 +1574,9 @@ function UI:LayoutBars(f)
     local i
     for i = 1, MAX_BARS do
         local bar = f.bars[i]
+        if not bar then
+            break
+        end
         bar:SetHeight(barH)
         bar:SetWidth(width)
         bar:ClearAllPoints()
@@ -1680,6 +1776,9 @@ function UI:RefreshFrame(f)
     local durationSlot = showDuration and 1 or 0
     for i = 1, MAX_BARS do
         local bar = f.bars[i]
+        if not bar then
+            break
+        end
         local entry = nil
         local isDurationRow = false
 
@@ -1931,6 +2030,13 @@ function UI:AddFrame(sourceFrame)
         f.mode = (UI.FirstEnabledMode and UI.FirstEnabledMode()) or "damage"
     end
     f:Show()
+    if self.ApplyHeaderLayout then
+        local ht = OM.GetSetting and OM:GetSetting("hideTitle") == true
+        self:ApplyHeaderLayout(f, ht, 0)
+    end
+    if self.LayoutBars then
+        self:LayoutBars(f)
+    end
     self:RefreshFrame(f)
     self:SaveAllFrameLayouts()
 end
@@ -1959,10 +2065,15 @@ function UI:RestoreSavedFrames()
     if not OM.GetLayoutDB then return end
     local layoutDB = OM:GetLayoutDB()
     if not layoutDB or not layoutDB.frames then return end
-    -- Already have extra windows
     if table.getn(self.frames) > 1 then return end
+    local maxI, k = 1, nil
+    for k in pairs(layoutDB.frames) do
+        if type(k) == "number" and k > maxI then
+            maxI = k
+        end
+    end
     local i
-    for i = 2, table.getn(layoutDB.frames) do
+    for i = 2, maxI do
         if table.getn(self.frames) >= MAX_FRAMES then break end
         local saved = layoutDB.frames[i]
         if saved then
@@ -1971,6 +2082,9 @@ function UI:RestoreSavedFrames()
             self:ApplySavedLayout(f, i)
             if saved.shown ~= false then
                 f:Show()
+            end
+            if self.LayoutBars then
+                self:LayoutBars(f)
             end
             self:RefreshFrame(f)
         end

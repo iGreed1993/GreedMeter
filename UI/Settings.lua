@@ -870,24 +870,66 @@ end
 -- Module events
 -- ============================================================
 
+function UI:OnZone()
+    if self.ApplySettingsToFrames then
+        self:ApplySettingsToFrames()
+    end
+    if UI.ApplySoloVisibility then
+        UI.ApplySoloVisibility()
+    end
+    if self.frames and self.RelayoutIfSizeChanged then
+        local i, f
+        for i = 1, table.getn(self.frames) do
+            f = self.frames[i]
+            if f and f:IsShown() then
+                self.RelayoutIfSizeChanged(f)
+            end
+        end
+    end
+    if UI.AnyFrameHidesOOC and UI.AnyFrameHidesOOC() then
+        if not OM.inCombat then
+            self.oocForceVisible = false
+            if UI.StartOOCFadeOut then
+                UI.StartOOCFadeOut()
+            end
+        end
+    end
+end
+
 function UI:OnLoad()
+    if not OM._varsReady then
+        if not self.mainFrame then
+            self:CreateMeterFrame(true)
+        end
+        return
+    end
     if not OM.db then
         OM:InitDB()
     end
     if not self.mainFrame then
         self:CreateMeterFrame(true)
     end
-    self:LayoutBars(self.mainFrame)
     if self.RestoreSavedFrames then
         self:RestoreSavedFrames()
     end
-    self._onloadCount = (self._onloadCount or 0) + 1
-    if not self._skipReanchor then
-        if self.ApplySavedLayout then
-            self:ApplySavedLayout(self.mainFrame, 1)
-        end
-        if self._onloadCount >= 2 then
-            self._skipReanchor = true
+    if self.ApplySavedLayout then
+        self:ApplySavedLayout(self.mainFrame, 1)
+    end
+    if self.frames then
+        local i, f
+        for i = 1, table.getn(self.frames) do
+            f = self.frames[i]
+            if f then
+                if i > 1 and self.ApplySavedLayout then
+                    self:ApplySavedLayout(f, i)
+                end
+                if self.LayoutBars then
+                    self:LayoutBars(f)
+                end
+                if self.RefreshFrame and f:IsShown() then
+                    self:RefreshFrame(f)
+                end
+            end
         end
     end
     -- Show meters on login by default (respect saved shown state from layout DB)
@@ -926,6 +968,15 @@ function UI:OnLoad()
             elapsed = elapsed + arg1
             if elapsed >= 0.5 then
                 elapsed = 0
+                if UI.frames and UI.RelayoutIfSizeChanged then
+                    local i, f
+                    for i = 1, table.getn(UI.frames) do
+                        f = UI.frames[i]
+                        if f and f:IsShown() then
+                            UI.RelayoutIfSizeChanged(f)
+                        end
+                    end
+                end
                 if OM.inCombat then
                     UI:Refresh()
                 end
