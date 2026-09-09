@@ -232,8 +232,12 @@ function OM:SetSetting(key, value)
         self.db = GreedMeterDB or {}
         GreedMeterDB = self.db
     end
-    local scope = 0
     local UI = GreedMeter.UI
+    -- Widget refresh (tab switch) must not write or wipe overrides
+    if UI and UI._syncingSettings then
+        return
+    end
+    local scope = 0
     if UI and UI.settingsScope then
         scope = tonumber(UI.settingsScope) or 0
     end

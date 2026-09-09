@@ -270,6 +270,7 @@ function UI:CreateSettingsFrame()
     local function RefreshSettingWidgets()
         local scope = UI.settingsScope or 0
         OM._readIndex = scope
+        UI._syncingSettings = true
         local i, w
         if UI._setWidgets then
             for i = 1, table.getn(UI._setWidgets) do
@@ -293,6 +294,7 @@ function UI:CreateSettingsFrame()
             f.renameBox:SetText(OM.GetWindowLabel and OM:GetWindowLabel(scope) or ("Window " .. scope))
         end
         OM._readIndex = nil
+        UI._syncingSettings = nil
     end
     f.RefreshSettingWidgets = RefreshSettingWidgets
 
